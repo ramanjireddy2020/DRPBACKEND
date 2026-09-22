@@ -1,0 +1,143 @@
+# Authoritative app config.
+#
+# `databricks bundle deploy` cannot currently update this app: CLI 2.16.0's
+# `direct` engine sends `forward_user_access_token` in the update mask and the
+# Apps API rejects it (400 INVALID_PARAMETER_VALUE). So the app is deployed with
+# `databricks apps deploy --source-code-path <bundle files path>`, which reads
+# this file, while `bundle deploy` still owns the jobs and the file upload.
+#
+# `resources/drp_api_app.app.yml` mirrors this for the day that bug is fixed —
+# keep the two in step. Secret values are referenced by `valueFrom: <resource>`;
+# the resources themselves are already attached to the app.
+command: ["uvicorn", "DRP_Main.app.main:app", "--host", "0.0.0.0", "--port", "$DATABRICKS_APP_PORT"]
+
+env:
+  - name: "PYTHONPATH"
+    value: "src"
+  - name: "LOG_DIR"
+    value: "/tmp"
+  # Model Serving calls build their URL as "{DATABRICKS_HOST}/serving-endpoints/…".
+  # Apps does not inject DATABRICKS_HOST, so without this the host is empty and
+  # every call fails with "Request URL is missing an 'http://' or 'https://'
+  # protocol" — which reads like an unreachable endpoint rather than missing
+  # config. The bundle app resource sets this via ${workspace.host}; this file is
+  # what an `apps deploy` actually reads, so it needs the literal.
+  - name: "DATABRICKS_HOST"
+    value: "https://dbc-96626831-6c96.cloud.databricks.com"
+  - name: "DATABRICKS_LLM_ENDPOINT"
+    value: "databricks-meta-llama-3-3-70b-instruct"
+  - name: "NOVSEARCH_EMBEDDING_ENDPOINT"
+    value: "databricks-qwen3-embedding-0-6b"
+  # The Apps filesystem is read-only except /tmp, so the default relative SQLite
+  # path cannot be created; `init_drp()` then skips table creation, which takes
+  # the whole /v1 surface down since every endpoint there needs the DB. /tmp lets
+  # /v1 mount, but is per-container and lost on restart — replace with a real
+  # Postgres/Lakebase URL before this carries anything that must persist.
+  - name: "DATABASE_URL"
+    value: "sqlite:////tmp/innodd.db"
+  - name: "NOVELTY_DATABASE_URL"
+    value: "sqlite:////tmp/noveltysearch.db"
+  # Unity Catalog — where module output is written and read back from.
+  # `drug_repository` is a medallion, so Gold output belongs in `gold`.
+  - name: "DRP_UC_CATALOG"
+    value: "drug_repository"
+  - name: "DRP_GOLD_SCHEMA"
+    value: "gold"
+  - name: "DRP_UC_WAREHOUSE_ID"
+    value: "9ead5d85fc3be5c4"
+  - name: "DRP_UC_WRITES_ENABLED"
+    value: "true"
+  # Where an agent job's work runs: "inprocess" calls app/modules/* directly;
+  # "databricks" triggers the module job and reads Gold back. Deliberately
+  # in-process — the job notebooks are still placeholders, so flipping this now
+  # would serve PLACEHOLDER rows instead of real results.
+  - name: "DRP_EXECUTION_BACKEND"
+    value: "inprocess"
+  # Per-module opt-in, independent of the global switch above. ScreenSuite's job
+  # notebook runs the real docking pipeline (verified 2026-09-15: JAK2/6VGL vs
+  # ruxolitinib, -8.342 kcal/mol), so it alone goes to its job. TxKG's notebook is
+  # still a placeholder, which is why the global switch stays "inprocess".
+  # The app's service principal holds CAN_MANAGE_RUN on job 377908132020938.
+  - name: "DRP_DATABRICKS_MODULES"
+    value: "ScreenSuite"
+  # Per-module job ids, read by app/drp/execution.py and orchestration/router.py.
+  - name: "JOB_ID_TXKG"
+    value: "325714213488150"
+  - name: "JOB_ID_LITMINEX"
+    value: "116100138016921"
+  - name: "JOB_ID_CURATEX"
+    value: "603719121829217"
+  - name: "JOB_ID_SCREENSUITE"
+    value: "377908132020938"
+  - name: "JOB_ID_NOVELTY"
+    value: "447505307735156"
+  # Secrets — resolved from the app's own resources, never embedded here.
+  - name: "GROQ_API_KEY"
+    valueFrom: "groq-api-key"
+  - name: "GOOGLE_API_KEY"
+    valueFrom: "google-api-key"
+  - name: "SERPAPI_API_KEY"
+    valueFrom: "serpapi-api-key"
+  - name: "HF_TOKEN"
+    valueFrom: "hf-token"
+  - name: "QDRANT_URL"
+    valueFrom: "qdrant-url"
+  - name: "QDRANT_API_KEY"
+    valueFrom: "qdrant-api-key"
+  - name: "LANGFUSE_SECRET_KEY"
+    valueFrom: "langfuse-secret-key"
+  - name: "LANGFUSE_PUBLIC_KEY"
+    valueFrom: "langfuse-public-key"
+  - name: "SECRET_KEY"
+    valueFrom: "app-secret-key"
+  - name: "AZURE_OPENAI_ENDPOINT"
+    valueFrom: "azure-openai-endpoint"
+  - name: "AZURE_OPENAI_API_KEY"
+    valueFrom: "azure-openai-api-key"
+  - name: "LANGFUSE_HOST"
+    value: "https://us.cloud.langfuse.com"
+  - name: "AZURE_OPENAI_DEPLOYMENT"
+    value: "gpt-4o"
+  - name: "AZURE_OPENAI_API_VERSION"
+    value: "2024-05-01-preview"
+  # The frontend's Cognito user pool. These identifiers are public (they appear
+  # in every browser request); the pool's public JWKS is all the API needs to
+  # verify a token, so there is no secret to configure here.
+  - name: "COGNITO_REGION"
+    value: "us-east-1"
+  - name: "COGNITO_USER_POOL_ID"
+    value: "us-east-1_AYZb6Pkib"
+  - name: "COGNITO_APP_CLIENT_ID"
+    value: "4amqg86j1fpf6fcp7cuph1cg8q"
+  # Stopgap: the Lambda proxy forwards query params but drops headers, so the
+  # end user's Cognito token has nowhere else to travel. Set to "false" once the
+  # proxy forwards Authorization/X-Drp-Token — query strings reach access logs.
+  - name: "DRP_ALLOW_QUERY_TOKEN"
+    value: "true"
+  # TxKG's BioKG dataset. It is ~320 MB of TSVs, far too large to ship inside the
+  # app source, so it lives in a Unity Catalog volume mounted read-only into the
+  # container. Without this the module fails every job with "BioKG data is not
+  # loaded", because the default path points inside the (empty) source tree.
+  - name: "BIOKG_DATA_DIR"
+    value: "/Volumes/drug_repository/bronze/biokg_raw"
+
+# Grants the app's service principal CAN_QUERY on the pay-per-token endpoints
+# TxKG/Novelty now call through llm_client.databricks() / databricks_clients.py.
+resources:
+  - name: "llm-endpoint"
+    serving_endpoint:
+      name: "databricks-meta-llama-3-3-70b-instruct"
+      permission: "CAN_QUERY"
+  - name: "embedding-endpoint"
+    serving_endpoint:
+      name: "databricks-qwen3-embedding-0-6b"
+      permission: "CAN_QUERY"
+  # TxKG's BioKG dataset (~320 MB of TSVs). Granting READ_VOLUME to the app's
+  # service principal is not sufficient on its own — the volume must also be
+  # declared here for Apps to expose /Volumes to the container, otherwise the
+  # path exists but every read fails with EACCES.
+  - name: "biokg-volume"
+    uc_securable:
+      securable_type: "VOLUME"
+      securable_full_name: "drug_repository.bronze.biokg_raw"
+      permission: "READ_VOLUME"

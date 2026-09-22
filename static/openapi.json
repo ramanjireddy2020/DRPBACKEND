@@ -1,0 +1,1496 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "InnoDD API",
+    "version": "2.0.0",
+    "description": "Complete InnoDD drug-discovery platform surface, generated from source (not the Postman collection).\n\n**Two surfaces:**\n- `/api/v1/*` — legacy internal pipeline modules (TxKG, Literature Mining, Drug Curation, Screening, Novelty Search) plus Auth/Users/Items scaffolding and job Orchestration. No X-Drp-Token needed.\n- `/v1/*` — the DRP frontend-facing contract (async job pattern: POST creates a job -> 202 {jobId}, then poll status/result). Needs `X-Drp-Token` (or `Authorization: Bearer`) from `/v1/auth/login`.\n\n**Known gaps / stubs (do not rely on for testing):**\n- `POST /api/v1/auth/login` and `/api/v1/auth/token` are unimplemented stubs (`pass`) in the legacy scaffold.\n- `/api/v1/users/*` imports a `UserRead` model that does not exist in `app/schemas/user.py` — this router likely fails to import and is NOT actually mounted.\n- `/api/v1/agentic/*` never mounts — `agent_routes.py` does not exist as a file; `_include()` swallows the ImportError.\n- Several module routers are double-mounted: Literature Mining, Drug Curation, Screening, and Novelty Search each exist BOTH under their versioned prefix (e.g. `/api/v1/literature-mining/...`) AND again with no prefix as a legacy alias (e.g. `/api/v1/search-keywords/`) — both paths are live simultaneously and hit the same handler.",
+    "contact": { "name": "InnoDD API" }
+  },
+  "servers": [
+    { "url": "http://localhost:8080", "description": "Local uvicorn" },
+    { "url": "https://innodd-api-7474645714257046.aws.databricksapps.com", "description": "Databricks App (deployed)" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "drpToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Drp-Token",
+        "description": "Access token returned by POST /v1/auth/login or /v1/auth/refresh. The server also accepts a standard Authorization: Bearer header as a fallback."
+      }
+    },
+    "schemas": {
+      "JobAccepted": { "type": "object", "properties": { "jobId": { "type": "string" } } },
+      "SuccessResponse": { "type": "object", "properties": { "success": { "type": "boolean" } } },
+
+      "UserCreate": { "type": "object", "properties": { "username": { "type": "string" }, "email": { "type": "string" }, "password": { "type": "string" } } },
+      "UserOut": { "type": "object", "properties": { "id": { "type": "integer" }, "username": { "type": "string" }, "email": { "type": "string" } } },
+      "UserUpdate": { "type": "object", "properties": { "username": { "type": "string" }, "email": { "type": "string" } } },
+      "ItemCreate": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" } } },
+      "ItemUpdate": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" } } },
+      "Item": { "type": "object", "properties": { "id": { "type": "integer" }, "name": { "type": "string" }, "description": { "type": "string" } } },
+
+      "RunRequest": {
+        "type": "object",
+        "properties": {
+          "input": { "type": "string", "nullable": true },
+          "catalog": { "type": "string", "nullable": true },
+          "schema": { "type": "string", "nullable": true }
+        }
+      },
+
+      "Target": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "type": { "type": "string" },
+          "score": { "type": "number" },
+          "paths": { "type": "array", "items": { "type": "object" } }
+        }
+      },
+      "Disease": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" } } },
+
+      "ArticleResult": {
+        "type": "object",
+        "properties": {
+          "protein_name": { "type": "string" },
+          "title": { "type": "string" },
+          "score": { "type": "number", "minimum": 0, "maximum": 100 },
+          "pdf_file_path": { "type": "string", "nullable": true },
+          "found_keywords": { "type": "array", "items": { "type": "string" } },
+          "preview": { "type": "string" }
+        }
+      },
+      "SearchResponse": {
+        "type": "object",
+        "properties": { "results": { "type": "array", "items": { "$ref": "#/components/schemas/ArticleResult" } } }
+      },
+      "LitMineXRequest": {
+        "type": "object",
+        "properties": {
+          "target": { "type": "string", "nullable": true },
+          "disease": { "type": "string", "nullable": true },
+          "query": { "type": "string", "nullable": true },
+          "source": { "type": "string", "enum": ["txkg_carryover", "user_direct"], "default": "user_direct" },
+          "session_id": { "type": "string", "nullable": true },
+          "max_results": { "type": "integer", "minimum": 1, "maximum": 500 },
+          "top_n": { "type": "integer", "minimum": 1, "maximum": 50 },
+          "exclude_reviews": { "type": "boolean" }
+        },
+        "description": "At least one of query/target/disease is required."
+      },
+      "LitMineXFollowUpRequest": {
+        "type": "object",
+        "required": ["question", "session_id"],
+        "properties": {
+          "question": { "type": "string" },
+          "session_id": { "type": "string" },
+          "pmids": { "type": "array", "items": { "type": "string" } },
+          "deep": { "type": "boolean", "default": false }
+        }
+      },
+      "LitMineXResponse": {
+        "type": "object",
+        "properties": {
+          "module": { "type": "string", "example": "litminex" },
+          "target": { "type": "string", "nullable": true },
+          "disease": { "type": "string", "nullable": true },
+          "query_answer": {
+            "type": "object",
+            "properties": { "text": { "type": "string" }, "cited_pmids": { "type": "array", "items": { "type": "string" } } }
+          },
+          "article_table": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "pmid": { "type": "string" }, "title": { "type": "string" }, "relevance_score": { "type": "number" },
+                "pdf_link": { "type": "string" }, "journal": { "type": "string" }, "pub_date": { "type": "string" },
+                "per_article_summary": { "type": "string" }
+              }
+            }
+          },
+          "session_state_update": {
+            "type": "object",
+            "properties": { "litminex_last_query": { "type": "string" }, "litminex_articles": { "type": "array", "items": { "type": "object" } } }
+          },
+          "ranked_articles": { "type": "array", "items": { "type": "object" } },
+          "query_terms": { "type": "object" },
+          "pubmed_query": { "type": "string" },
+          "pipeline_backends": { "type": "object" }
+        }
+      },
+      "ClarificationResponse": { "type": "object", "properties": { "message": { "type": "string" }, "needs": { "type": "array", "items": { "type": "string" } } } },
+      "LitMineXFollowUpResponse": { "type": "object", "properties": { "answer": { "type": "string" }, "cited_pmids": { "type": "array", "items": { "type": "string" } } } },
+
+      "FetchCompoundsRequest": {
+        "type": "object",
+        "properties": {
+          "story_content": { "type": "string", "minLength": 10, "nullable": true },
+          "criteria": { "type": "string", "minLength": 10, "nullable": true },
+          "num_results": { "type": "integer", "minimum": 15, "maximum": 50, "default": 20 },
+          "validate_urls": { "type": "boolean", "default": true },
+          "skip_pubmed": { "type": "boolean", "default": false }
+        }
+      },
+      "CompoundResult": {
+        "type": "object",
+        "properties": {
+          "compound_name": { "type": "string" }, "content": { "type": "object" },
+          "confidence_score": { "type": "number", "minimum": 0, "maximum": 100 },
+          "exact_criteria_match": { "type": "object" }, "websites": { "type": "array", "items": { "type": "string" } },
+          "pubmed_articles": { "type": "array", "items": { "type": "object" } }, "pubmed_query_used": { "type": "string" }
+        }
+      },
+      "CurationResponse": {
+        "type": "object",
+        "properties": {
+          "compounds": { "type": "array", "items": { "$ref": "#/components/schemas/CompoundResult" } },
+          "total_compounds": { "type": "integer" }, "criteria": { "type": "string" }, "search_metadata": { "type": "object" }
+        }
+      },
+      "CompoundVerificationRequest": { "type": "object", "required": ["compounds"], "properties": { "compounds": { "type": "array", "items": { "type": "object" } } } },
+      "VerificationResponse": {
+        "type": "object",
+        "properties": {
+          "verification_results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "compound": { "type": "string" }, "verification_details": { "type": "array", "items": { "type": "object" } },
+                "overall_status": { "type": "string" }, "summary": { "type": "string" }
+              }
+            }
+          },
+          "summary": { "type": "string" }
+        }
+      },
+      "CandidateTargetRef": {
+        "type": "object",
+        "properties": { "name": { "type": "string" }, "uniprotId": { "type": "string", "nullable": true }, "score": { "type": "number", "nullable": true }, "category": { "type": "string", "nullable": true } }
+      },
+      "ProfileRequest": {
+        "type": "object",
+        "properties": {
+          "target": { "type": "string", "nullable": true },
+          "targets": { "type": "array", "items": { "type": "string" } },
+          "disease": { "type": "string", "nullable": true },
+          "candidateTargets": { "type": "array", "items": { "$ref": "#/components/schemas/CandidateTargetRef" } },
+          "weights": { "type": "object", "additionalProperties": { "type": "number" } },
+          "skipDailyMed": { "type": "boolean", "default": false },
+          "sessionId": { "type": "string", "nullable": true }
+        }
+      },
+      "ScoreRequest": {
+        "type": "object",
+        "required": ["sessionId"],
+        "properties": {
+          "sessionId": { "type": "string" },
+          "target": { "type": "string", "nullable": true },
+          "weights": { "type": "object", "additionalProperties": { "type": "number" } },
+          "topN": { "type": "integer", "minimum": 1, "maximum": 200, "default": 25 },
+          "universeLimit": { "type": "integer", "minimum": 50, "maximum": 5000, "default": 500 },
+          "minPhase": { "type": "integer", "minimum": 0, "maximum": 4, "default": 1 },
+          "skipEvidence": { "type": "boolean", "default": false }
+        }
+      },
+      "CurateXRunRequest": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ProfileRequest" },
+          { "type": "object", "properties": {
+            "topN": { "type": "integer", "minimum": 1, "maximum": 200, "default": 25 },
+            "universeLimit": { "type": "integer", "minimum": 50, "maximum": 5000, "default": 500 },
+            "minPhase": { "type": "integer", "minimum": 0, "maximum": 4, "default": 1 },
+            "skipEvidence": { "type": "boolean", "default": false }
+          } }
+        ]
+      },
+      "WeightValidationRequest": { "type": "object", "required": ["weights"], "properties": { "weights": { "type": "object", "additionalProperties": { "type": "number" } } } },
+
+      "AffinityRecord": {
+        "type": "object",
+        "properties": {
+          "Mode": { "type": "integer" }, "Affinity_kcal_per_mol": { "type": "number" },
+          "protien_ligand": { "type": "string" }, "protein": { "type": "string" }, "ligand": { "type": "string" }, "out_pdbqt_file": { "type": "string" }
+        }
+      },
+      "ProteinBase": {
+        "type": "object",
+        "required": ["protein_name", "pdb_file_path"],
+        "properties": {
+          "protein_name": { "type": "string" }, "pdb_file_path": { "type": "string" },
+          "top_n_affinity_records": { "type": "array", "items": { "$ref": "#/components/schemas/AffinityRecord" }, "nullable": true },
+          "status": { "type": "string", "nullable": true }, "time_taken": { "type": "number", "nullable": true }, "task_id": { "type": "string", "nullable": true }
+        }
+      },
+      "DrugBase": { "type": "object", "required": ["drug_name", "sdf_file_path"], "properties": { "drug_name": { "type": "string" }, "sdf_file_path": { "type": "string" } } },
+      "ProcessProteinRequestBody": {
+        "type": "object",
+        "properties": {
+          "protein": { "$ref": "#/components/schemas/ProteinBase" },
+          "drugs": { "type": "array", "items": { "$ref": "#/components/schemas/DrugBase" } }
+        }
+      },
+      "ProcessProteinResponse": {
+        "type": "object",
+        "properties": {
+          "protein_name": { "type": "string" }, "pdb_file_path": { "type": "string" },
+          "top_n_affinity_records": { "type": "array", "items": { "$ref": "#/components/schemas/AffinityRecord" } },
+          "status": { "type": "string" }, "time_taken": { "type": "number" }, "abort": { "type": "boolean" }
+        }
+      },
+      "DownloadProteinDrugResponse": {
+        "type": "object",
+        "properties": { "proteins": { "type": "array", "items": { "type": "object" } }, "drugs": { "type": "array", "items": { "type": "object" } } }
+      },
+
+      "NovSearchRequest": {
+        "type": "object",
+        "properties": {
+          "source": { "type": "string", "nullable": true }, "query": { "type": "string", "nullable": true },
+          "target": { "type": "string", "nullable": true }, "drug": { "type": "string", "nullable": true },
+          "disease": { "type": "string", "nullable": true }, "candidate_id": { "type": "string", "nullable": true },
+          "docking_id": { "type": "string", "nullable": true }, "num_results": { "type": "integer", "minimum": 1, "maximum": 20, "default": 5 }
+        }
+      },
+      "NovSearchQARequest": {
+        "type": "object",
+        "required": ["question"],
+        "properties": {
+          "question": { "type": "string" },
+          "patent_ids": { "type": "array", "items": { "type": "string" } },
+          "top_k": { "type": "integer", "minimum": 1, "maximum": 50 }
+        }
+      },
+      "NovSearchResponse": {
+        "type": "object",
+        "properties": {
+          "module": { "type": "string", "example": "novsearch" }, "input_source": { "type": "string" }, "query": { "type": "string" },
+          "candidate_id": { "type": "string", "nullable": true }, "docking_id": { "type": "string", "nullable": true },
+          "report": {
+            "type": "object",
+            "properties": {
+              "agent_answer": { "type": "string" }, "recommendations": { "type": "string" },
+              "patents_used": { "type": "array", "items": { "type": "string" } },
+              "total_patents": { "type": "integer" }, "total_chunks": { "type": "integer" }, "model_used": { "type": "string", "nullable": true }
+            }
+          },
+          "patents_table": { "type": "array", "items": { "type": "object" } },
+          "indexing": { "type": "object" }, "session_state_update": { "type": "object" }
+        }
+      },
+      "NovSearchQAResponse": { "type": "object", "properties": { "answer": { "type": "string" }, "mode": { "type": "string" }, "patent_ids_used": { "type": "array", "items": { "type": "string" } } } },
+
+      "LoginRequest": { "type": "object", "required": ["email", "password"], "properties": { "email": { "type": "string" }, "password": { "type": "string" } } },
+      "DrpUser": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "role": { "type": "string" }, "avatarUrl": { "type": "string", "nullable": true }, "email": { "type": "string" } } },
+      "LoginResponse": {
+        "type": "object",
+        "properties": { "accessToken": { "type": "string" }, "refreshToken": { "type": "string" }, "expiresIn": { "type": "integer", "example": 3600 }, "user": { "$ref": "#/components/schemas/DrpUser" } }
+      },
+      "RefreshRequest": { "type": "object", "required": ["refreshToken"], "properties": { "refreshToken": { "type": "string" } } },
+      "RefreshResponse": { "type": "object", "properties": { "accessToken": { "type": "string" }, "expiresIn": { "type": "integer" } } },
+      "ForgotPasswordRequest": { "type": "object", "properties": { "email": { "type": "string", "nullable": true } } },
+      "OnboardingStatus": { "type": "object", "properties": { "completed": { "type": "boolean" }, "currentStep": { "type": "string" } } },
+      "ResearchFocusRequest": { "type": "object", "properties": { "therapeuticAreas": { "type": "array", "items": { "type": "string" } } } },
+
+      "DashboardSummary": { "type": "object", "properties": { "activeProjects": { "type": "integer" }, "targetsIdentified": { "type": "integer" }, "compoundsCurated": { "type": "integer" }, "patentsAnalysed": { "type": "integer" } } },
+      "QuickAction": { "type": "object", "properties": { "label": { "type": "string" }, "module": { "type": "string" }, "prefillQuery": { "type": "string" } } },
+      "PipelineProgress": { "type": "object", "properties": { "target": { "type": "string" }, "pipelineType": { "type": "string" }, "progressPercent": { "type": "integer" } } },
+      "PipelineDetail": {
+        "allOf": [
+          { "$ref": "#/components/schemas/PipelineProgress" },
+          { "type": "object", "properties": { "id": { "type": "string" }, "status": { "type": "string" }, "projectId": { "type": "string", "nullable": true }, "jobId": { "type": "string", "nullable": true }, "updatedAt": { "type": "string", "format": "date-time" } } }
+        ]
+      },
+
+      "Module": { "type": "object", "properties": { "key": { "type": "string" }, "displayName": { "type": "string" }, "icon": { "type": "string" }, "description": { "type": "string" } } },
+      "JobStatusResponse": { "type": "object", "properties": { "jobId": { "type": "string" }, "status": { "type": "string", "enum": ["pending", "running", "completed", "failed"] }, "progressMessage": { "type": "string", "nullable": true }, "module": { "type": "string" }, "error": { "type": "string", "nullable": true } } },
+      "JobResultResponse": { "type": "object", "properties": { "jobId": { "type": "string" }, "module": { "type": "string" }, "kind": { "type": "string" }, "result": { "type": "object" } } },
+
+      "SessionMessage": { "type": "object", "properties": { "role": { "type": "string" }, "content": { "type": "string" } } },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" }, "module": { "type": "string", "nullable": true }, "title": { "type": "string" },
+          "status": { "type": "string" }, "summary": { "type": "string", "nullable": true }, "updatedAt": { "type": "string", "format": "date-time" },
+          "messages": { "type": "array", "items": { "$ref": "#/components/schemas/SessionMessage" } }
+        }
+      },
+      "SessionPage": {
+        "type": "object",
+        "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/Session" } }, "page": { "type": "integer" }, "totalPages": { "type": "integer" } }
+      },
+      "CreateSessionRequest": { "type": "object", "required": ["query"], "properties": { "query": { "type": "string" }, "module": { "type": "string", "nullable": true }, "projectId": { "type": "string", "nullable": true } } },
+      "DraftSessionRequest": { "type": "object", "properties": { "query": { "type": "string", "nullable": true }, "module": { "type": "string", "nullable": true }, "projectId": { "type": "string", "nullable": true } } },
+      "DraftSessionResponse": { "type": "object", "properties": { "id": { "type": "string" }, "query": { "type": "string", "nullable": true }, "module": { "type": "string", "nullable": true } } },
+
+      "TxkgQueryRequest": {
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+          "query": { "type": "string", "example": "Find protein targets associated with lung cancer" },
+          "projectId": { "type": "string", "nullable": true },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 10 },
+          "maxHops": { "type": "integer", "minimum": 1, "maximum": 5, "default": 3 }
+        }
+      },
+      "DrpTarget": {
+        "type": "object",
+        "properties": {
+          "uniprotId": { "type": "string" }, "name": { "type": "string" }, "score": { "type": "number" },
+          "geneName": { "type": "string", "nullable": true }, "fullName": { "type": "string", "nullable": true },
+          "hopDistance": { "type": "integer", "nullable": true }, "connectionTypes": { "type": "array", "items": { "type": "string" } },
+          "fromKnowledgeGraph": { "type": "boolean", "default": true }, "customAdded": { "type": "boolean", "default": false },
+          "category": { "type": "string", "enum": ["Known/Direct", "Hidden/Novel"], "nullable": true },
+          "confirmed": { "type": "boolean", "nullable": true }, "sourcingStatus": { "type": "string", "nullable": true },
+          "noveltyLabel": { "type": "string", "nullable": true }, "correctedScore": { "type": "number", "nullable": true },
+          "literatureHits": { "type": "integer", "nullable": true }, "patentHits": { "type": "integer", "nullable": true },
+          "supportingSources": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "TargetDetail": {
+        "type": "object",
+        "properties": {
+          "uniprotId": { "type": "string" }, "name": { "type": "string" }, "geneName": { "type": "string", "nullable": true },
+          "fullName": { "type": "string", "nullable": true }, "organism": { "type": "string" }, "uniprotUrl": { "type": "string" },
+          "score": { "type": "number", "nullable": true }, "connectionTypes": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "InsightPanel": { "type": "object", "properties": { "tab": { "type": "string" }, "content": { "type": "string" }, "items": { "type": "array", "items": { "type": "object" } } } },
+
+      "SubgraphRequest": {
+        "type": "object",
+        "required": ["disease"],
+        "properties": {
+          "disease": { "type": "string" }, "targetIds": { "type": "array", "items": { "type": "string" } },
+          "selectedTarget": { "type": "string", "nullable": true }, "maxNodes": { "type": "integer", "minimum": 10, "maximum": 500, "default": 100 }
+        }
+      },
+      "GraphNode": { "type": "object", "properties": { "id": { "type": "string" }, "label": { "type": "string" }, "type": { "type": "string" } } },
+      "GraphEdge": { "type": "object", "properties": { "source": { "type": "string" }, "target": { "type": "string" }, "relation": { "type": "string" } } },
+      "KnowledgeGraph": {
+        "type": "object",
+        "properties": {
+          "nodes": { "type": "array", "items": { "$ref": "#/components/schemas/GraphNode" } },
+          "edges": { "type": "array", "items": { "$ref": "#/components/schemas/GraphEdge" } },
+          "legend": { "type": "object" }
+        }
+      },
+      "GraphStats": { "type": "object", "properties": { "relationshipsFound": { "type": "integer" }, "drugCandidates": { "type": "integer" }, "pathwayConnections": { "type": "integer" } } },
+      "ExploreRequest": { "type": "object", "required": ["nodeId"], "properties": { "nodeId": { "type": "string" } } },
+      "MetapathRequest": { "type": "object", "required": ["jobId"], "properties": { "jobId": { "type": "string" } } },
+      "MetapathSummary": {
+        "type": "object",
+        "properties": {
+          "jobId": { "type": "string" }, "paths": { "type": "integer" }, "targets": { "type": "integer" },
+          "pathways": { "type": "integer" }, "nodes": { "type": "integer" }, "edges": { "type": "integer" }, "clusters": { "type": "integer" }
+        }
+      },
+      "TargetPredictionScore": { "type": "object", "properties": { "target": { "type": "string" }, "uniprotId": { "type": "string" }, "score": { "type": "number" }, "contextScore": { "type": "number" }, "totalPaths": { "type": "integer" } } },
+      "MetapathTraversal": { "type": "object", "properties": { "target": { "type": "string" }, "uniprotId": { "type": "string" }, "totalPaths": { "type": "integer" }, "pathsByHop": { "type": "object" }, "paths": { "type": "array", "items": { "type": "object" } } } },
+
+      "CustomTargetRequest": { "type": "object", "required": ["targetName"], "properties": { "targetName": { "type": "string" } } },
+      "LitminexQueryRequest": {
+        "type": "object",
+        "properties": {
+          "targetIds": { "type": "array", "items": { "type": "string" }, "example": ["EGFR"] },
+          "query": { "type": "string", "default": "", "example": "lung cancer" },
+          "maxResults": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+        }
+      },
+      "ArticleSummary": { "type": "object", "properties": { "id": { "type": "string" }, "title": { "type": "string" }, "confidenceScore": { "type": "number" }, "journal": { "type": "string", "nullable": true }, "pubDate": { "type": "string", "nullable": true } } },
+      "ArticlePage": {
+        "type": "object",
+        "properties": {
+          "totalArticles": { "type": "integer" }, "page": { "type": "integer" }, "totalPages": { "type": "integer" },
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/ArticleSummary" } }
+        }
+      },
+      "ArticlePreview": { "type": "object", "properties": { "id": { "type": "string" }, "title": { "type": "string" }, "snippet": { "type": "string" }, "confidenceScore": { "type": "number" }, "foundKeywords": { "type": "array", "items": { "type": "string" } } } },
+
+      "TargetProfileRequest": {
+        "type": "object",
+        "required": ["target"],
+        "properties": {
+          "target": { "type": "string" }, "sourceSessionId": { "type": "string", "nullable": true },
+          "disease": { "type": "string", "nullable": true }, "weights": { "type": "object", "additionalProperties": { "type": "number" } }
+        }
+      },
+      "CurateCompoundsRequest": {
+        "type": "object",
+        "required": ["target"],
+        "properties": {
+          "target": { "type": "string" }, "compound": { "type": "string", "nullable": true },
+          "numResults": { "type": "integer", "minimum": 15, "maximum": 50, "default": 20 },
+          "disease": { "type": "string", "nullable": true }, "weights": { "type": "object", "additionalProperties": { "type": "number" } }
+        }
+      },
+
+      "ScreenCompound": { "type": "object", "properties": { "drug_name": { "type": "string" }, "sdf_file_path": { "type": "string" } } },
+      "ScreenRequest": {
+        "type": "object",
+        "required": ["target"],
+        "properties": {
+          "target": { "type": "string" }, "compoundLibrary": { "type": "string", "nullable": true },
+          "pdbFilePath": { "type": "string", "nullable": true }, "compounds": { "type": "array", "items": { "$ref": "#/components/schemas/ScreenCompound" } }
+        }
+      },
+      "ScreeningHit": { "type": "object", "properties": { "mode": { "type": "integer" }, "compound": { "type": "string" }, "protein": { "type": "string" }, "affinityKcalPerMol": { "type": "number" }, "outputFile": { "type": "string" } } },
+
+      "NoveltyAssessRequest": {
+        "type": "object",
+        "properties": {
+          "target": { "type": "string", "nullable": true }, "disease": { "type": "string", "nullable": true },
+          "drug": { "type": "string", "nullable": true }, "query": { "type": "string", "nullable": true },
+          "candidateId": { "type": "string", "nullable": true }, "dockingId": { "type": "string", "nullable": true },
+          "numResults": { "type": "integer", "minimum": 1, "maximum": 20, "default": 5 }
+        }
+      },
+      "NoveltyReport": {
+        "type": "object",
+        "properties": {
+          "jobId": { "type": "string" }, "query": { "type": "string" }, "inputSource": { "type": "string" },
+          "candidateId": { "type": "string", "nullable": true }, "dockingId": { "type": "string", "nullable": true },
+          "target": { "type": "string", "nullable": true }, "disease": { "type": "string", "nullable": true },
+          "assessment": { "type": "string" }, "recommendations": { "type": "array", "items": { "type": "string" } },
+          "patents": { "type": "array", "items": { "type": "object" } }, "patentsUsed": { "type": "array", "items": { "type": "string" } },
+          "totalPatents": { "type": "integer" }, "totalChunks": { "type": "integer" }, "modelUsed": { "type": "string", "nullable": true }
+        }
+      },
+      "NoveltyQARequest": {
+        "type": "object",
+        "required": ["question"],
+        "properties": {
+          "question": { "type": "string" }, "patentIds": { "type": "array", "items": { "type": "string" } },
+          "topK": { "type": "integer", "minimum": 1, "maximum": 50 }
+        }
+      },
+      "NoveltyQAResponse": { "type": "object", "properties": { "answer": { "type": "string" }, "mode": { "type": "string" }, "patentIdsUsed": { "type": "array", "items": { "type": "string" } }, "chunksUsed": { "type": "integer" } } },
+
+      "ArticleDetail": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" }, "title": { "type": "string" }, "authors": { "type": "array", "items": { "type": "string" } },
+          "year": { "type": "integer", "nullable": true }, "abstract": { "type": "string" }, "keywords": { "type": "array", "items": { "type": "string" } }, "pmcLink": { "type": "string", "nullable": true }
+        }
+      },
+      "ExternalLink": { "type": "object", "properties": { "url": { "type": "string" }, "provider": { "type": "string" } } },
+      "ChatRequest": { "type": "object", "required": ["message"], "properties": { "message": { "type": "string" } } },
+      "ChatMessage": {
+        "type": "object",
+        "properties": { "role": { "type": "string" }, "content": { "type": "string" }, "citations": { "type": "array", "items": { "type": "string" } } }
+      },
+
+      "Project": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" }, "name": { "type": "string" }, "disease": { "type": "string" },
+          "module": { "type": "string" }, "status": { "type": "string" }, "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ProjectPage": {
+        "type": "object",
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } },
+          "totalCount": { "type": "integer" }, "page": { "type": "integer" }, "totalPages": { "type": "integer" }
+        }
+      },
+      "CreateProjectRequest": {
+        "type": "object",
+        "required": ["name"],
+        "properties": { "name": { "type": "string" }, "disease": { "type": "string", "default": "" }, "module": { "type": "string", "default": "" }, "status": { "type": "string", "default": "Active" } }
+      },
+      "ProjectItem": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" }, "resultType": { "type": "string" }, "sessionId": { "type": "string", "nullable": true },
+          "resultId": { "type": "string", "nullable": true }, "payload": { "type": "object" }, "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "SaveResultRequest": {
+        "type": "object",
+        "required": ["resultId", "resultType"],
+        "properties": {
+          "sessionId": { "type": "string", "nullable": true }, "resultId": { "type": "string" },
+          "resultType": { "type": "string", "enum": ["targets", "subgraph", "metapath", "litminex_results", "article"] }
+        }
+      },
+      "SaveResultResponse": { "type": "object", "properties": { "success": { "type": "boolean" }, "projectName": { "type": "string" }, "itemId": { "type": "string" } } },
+
+      "UploadResponse": { "type": "object", "properties": { "fileId": { "type": "string" }, "fileName": { "type": "string" }, "sizeBytes": { "type": "integer" } } },
+      "ExportRequest": { "type": "object", "required": ["resultId"], "properties": { "resultId": { "type": "string" }, "format": { "type": "string", "enum": ["csv", "json", "png", "svg"], "default": "csv" } } },
+      "PdfExportRequest": { "type": "object", "required": ["resultId"], "properties": { "resultId": { "type": "string" } } },
+      "ExportResponse": { "type": "object", "properties": { "downloadUrl": { "type": "string" } } }
+    }
+  },
+  "tags": [
+    { "name": "Health" },
+    { "name": "Auth (legacy scaffold)" },
+    { "name": "Users (legacy scaffold)" },
+    { "name": "Items (legacy scaffold)" },
+    { "name": "0. Orchestration" },
+    { "name": "1. TxKG — Target Identification" },
+    { "name": "1. TxKG — Discovery" },
+    { "name": "2. Literature Mining" },
+    { "name": "3. Drug Curation" },
+    { "name": "4. Screening Suite" },
+    { "name": "5. Novelty Search Agent (spec)" },
+    { "name": "5. Novelty Search Agent (legacy)" },
+    { "name": "DRP Auth & Onboarding" },
+    { "name": "DRP Dashboard" },
+    { "name": "DRP Modules & Jobs" },
+    { "name": "DRP Sessions" },
+    { "name": "DRP Agents - TxKG" },
+    { "name": "DRP Knowledge Graph" },
+    { "name": "DRP Agents - LitMinex" },
+    { "name": "DRP Agents - CuraTeX" },
+    { "name": "DRP Agents - ScreenSuite" },
+    { "name": "DRP Agents - NovSearch" },
+    { "name": "DRP Articles" },
+    { "name": "DRP Projects" },
+    { "name": "DRP Files & Export" }
+  ],
+  "paths": {
+    "/": { "get": { "tags": ["Health"], "summary": "Root", "responses": { "200": { "description": "OK" } } } },
+    "/health": { "get": { "tags": ["Health"], "summary": "Health check", "responses": { "200": { "description": "OK" } } } },
+
+    "/api/v1/auth/login": {
+      "post": {
+        "tags": ["Auth (legacy scaffold)"], "summary": "Login (STUB - unimplemented, returns nothing)",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UserCreate" } } } },
+        "responses": { "200": { "description": "OK (stub)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UserOut" } } } } }
+      }
+    },
+    "/api/v1/auth/token": {
+      "post": {
+        "tags": ["Auth (legacy scaffold)"], "summary": "Generate token (STUB - unimplemented)",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UserCreate" } } } },
+        "responses": { "200": { "description": "OK (stub)" } }
+      }
+    },
+    "/api/v1/auth/users/me": {
+      "get": {
+        "tags": ["Auth (legacy scaffold)"], "summary": "Read current user",
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UserOut" } } } } }
+      }
+    },
+
+    "/api/v1/users/": {
+      "post": {
+        "tags": ["Users (legacy scaffold)"], "summary": "Create user (router likely fails to import - UserRead missing)",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UserCreate" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/users/{user_id}": {
+      "get": { "tags": ["Users (legacy scaffold)"], "summary": "Read user", "parameters": [{ "name": "user_id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } },
+      "put": {
+        "tags": ["Users (legacy scaffold)"], "summary": "Update user",
+        "parameters": [{ "name": "user_id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UserUpdate" } } } },
+        "responses": { "200": { "description": "OK" } }
+      },
+      "delete": { "tags": ["Users (legacy scaffold)"], "summary": "Delete user", "parameters": [{ "name": "user_id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } }
+    },
+
+    "/api/v1/items/": {
+      "post": {
+        "tags": ["Items (legacy scaffold)"], "summary": "Create item",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ItemCreate" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Item" } } } } }
+      }
+    },
+    "/api/v1/items/{item_id}": {
+      "get": { "tags": ["Items (legacy scaffold)"], "summary": "Read item", "parameters": [{ "name": "item_id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Item" } } } } } },
+      "put": {
+        "tags": ["Items (legacy scaffold)"], "summary": "Update item",
+        "parameters": [{ "name": "item_id", "in": "path", "required": true, "schema": { "type": "integer" } }],
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ItemUpdate" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Item" } } } } }
+      },
+      "delete": { "tags": ["Items (legacy scaffold)"], "summary": "Delete item", "parameters": [{ "name": "item_id", "in": "path", "required": true, "schema": { "type": "integer" } }], "responses": { "200": { "description": "OK" } } }
+    },
+
+    "/api/v1/jobs/": {
+      "get": { "tags": ["0. Orchestration"], "summary": "List modules & job link status", "responses": { "200": { "description": "OK" } } }
+    },
+    "/api/v1/jobs/{module}/run-now": {
+      "post": {
+        "tags": ["0. Orchestration"], "summary": "Run job now",
+        "parameters": [{ "name": "module", "in": "path", "required": true, "schema": { "type": "string", "enum": ["txkg", "litminex", "curatex", "screensuite", "novelty"] } }],
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RunRequest" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/jobs/{module}/runs/{run_id}": {
+      "get": {
+        "tags": ["0. Orchestration"], "summary": "Get run status",
+        "parameters": [
+          { "name": "module", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "run_id", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+
+    "/api/v1/txkg": { "get": { "tags": ["1. TxKG — Target Identification"], "summary": "Root info", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/txkg/diseases": {
+      "get": {
+        "tags": ["1. TxKG — Target Identification"], "summary": "List diseases in KG",
+        "parameters": [
+          { "name": "search", "in": "query", "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 10000, "minimum": 1, "maximum": 100000 } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/txkg/predicted-targets": {
+      "get": {
+        "tags": ["1. TxKG — Target Identification"], "summary": "Predict targets for disease",
+        "parameters": [
+          { "name": "disease", "in": "query", "required": true, "schema": { "type": "string" }, "example": "lung cancer" },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 10, "minimum": 1, "maximum": 500 } },
+          { "name": "custom_proteins", "in": "query", "schema": { "type": "string" }, "description": "CSV of protein names" },
+          { "name": "max_hops", "in": "query", "schema": { "type": "integer", "default": 3, "minimum": 1, "maximum": 5 } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/txkg/subgraph": {
+      "get": {
+        "tags": ["1. TxKG — Target Identification"], "summary": "Get visualization subgraph",
+        "parameters": [
+          { "name": "disease", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "max_nodes", "in": "query", "schema": { "type": "integer", "default": 100, "minimum": 10, "maximum": 500 } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/txkg/llm-interpretation": {
+      "get": {
+        "tags": ["1. TxKG — Target Identification"], "summary": "LLM interpretation",
+        "parameters": [{ "name": "disease", "in": "query", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/txkg/articles": {
+      "get": {
+        "tags": ["1. TxKG — Target Identification"], "summary": "Get related articles",
+        "parameters": [
+          { "name": "disease", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "target", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/txkg/health": { "get": { "tags": ["1. TxKG — Target Identification"], "summary": "Module health", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/txkg/clear-cache": { "post": { "tags": ["1. TxKG — Target Identification"], "summary": "Clear all caches", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/txkg/reload-protein-index": { "post": { "tags": ["1. TxKG — Target Identification"], "summary": "Reload protein index from TSV", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/txkg/disease-edges": {
+      "get": {
+        "tags": ["1. TxKG — Target Identification"], "summary": "Get disease edges",
+        "parameters": [
+          { "name": "disease", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 100, "minimum": 1, "maximum": 500 } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/graphs/kg_graph.html": { "get": { "tags": ["1. TxKG — Target Identification"], "summary": "Serve graph HTML file", "responses": { "200": { "description": "OK", "content": { "text/html": {} } } } } },
+    "/api/v1/txkg/graph-html-content": { "get": { "tags": ["1. TxKG — Target Identification"], "summary": "Graph HTML as text", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/txkg/graph-status": { "get": { "tags": ["1. TxKG — Target Identification"], "summary": "Check graph status", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/txkg/metapaths": {
+      "get": {
+        "tags": ["1. TxKG — Target Identification"], "summary": "Get metapaths for disease",
+        "parameters": [
+          { "name": "disease", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 10, "minimum": 1, "maximum": 50 } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+
+    "/api/v1/txkg/tools/resolve-disease": {
+      "get": {
+        "tags": ["1. TxKG — Discovery"], "summary": "§1 Resolve disease",
+        "parameters": [{ "name": "disease", "in": "query", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/txkg/tools/paths": {
+      "get": {
+        "tags": ["1. TxKG — Discovery"], "summary": "§6 Path reconstruction (BFS)",
+        "parameters": [
+          { "name": "disease", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "uniprot_id", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "max_hops", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 5 } },
+          { "name": "max_paths", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 25 } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/txkg/tools/score": {
+      "get": {
+        "tags": ["1. TxKG — Discovery"], "summary": "§2-§5 RWRH propagation + degree correction",
+        "parameters": [
+          { "name": "disease", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "top_known", "in": "query", "schema": { "type": "integer", "default": 25, "minimum": 1, "maximum": 200 } },
+          { "name": "top_hidden", "in": "query", "schema": { "type": "integer", "default": 25, "minimum": 1, "maximum": 200 } },
+          { "name": "hidden_threshold", "in": "query", "schema": { "type": "number" } },
+          { "name": "keep_unconfirmed", "in": "query", "schema": { "type": "boolean", "default": true } },
+          { "name": "reconstruct_paths", "in": "query", "schema": { "type": "boolean", "default": true } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/txkg/tools/evidence": {
+      "get": {
+        "tags": ["1. TxKG — Discovery"], "summary": "§7-§8 Novelty + interpretation evidence",
+        "parameters": [
+          { "name": "disease", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "uniprot_ids", "in": "query", "required": true, "schema": { "type": "string" }, "description": "CSV" },
+          { "name": "articles_per_target", "in": "query", "schema": { "type": "integer", "default": 2, "minimum": 1, "maximum": 10 } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/txkg/discover": {
+      "get": {
+        "tags": ["1. TxKG — Discovery"], "summary": "Full §1-§10 discovery chain",
+        "parameters": [
+          { "name": "disease", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "top_known", "in": "query", "schema": { "type": "integer", "default": 10 } },
+          { "name": "top_hidden", "in": "query", "schema": { "type": "integer", "default": 10 } },
+          { "name": "interpret_top", "in": "query", "schema": { "type": "integer", "default": 5 } },
+          { "name": "articles_per_target", "in": "query", "schema": { "type": "integer", "default": 2 } },
+          { "name": "hidden_threshold", "in": "query", "schema": { "type": "number" } },
+          { "name": "keep_unconfirmed", "in": "query", "schema": { "type": "boolean", "default": true } },
+          { "name": "session_id", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/txkg/explain": {
+      "get": {
+        "tags": ["1. TxKG — Discovery"], "summary": "§11 Scoped follow-up",
+        "parameters": [
+          { "name": "session_id", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "uniprot_id", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/txkg/ask": {
+      "get": {
+        "tags": ["1. TxKG — Discovery"], "summary": "§11 Supervisor NL router",
+        "parameters": [
+          { "name": "message", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "session_id", "in": "query", "schema": { "type": "string", "default": "default" } },
+          { "name": "top_known", "in": "query", "schema": { "type": "integer", "default": 10 } },
+          { "name": "top_hidden", "in": "query", "schema": { "type": "integer", "default": 10 } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/graphs/discovery/{filename}": {
+      "get": {
+        "tags": ["1. TxKG — Discovery"], "summary": "Serve discovery graph HTML",
+        "parameters": [{ "name": "filename", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^txkg_discovery_.*$" } }],
+        "responses": { "200": { "description": "OK", "content": { "text/html": {} } } }
+      }
+    },
+    "/api/v1/txkg/discovery-health": { "get": { "tags": ["1. TxKG — Discovery"], "summary": "Discovery config/readiness", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/txkg/discovery-clear-cache": { "post": { "tags": ["1. TxKG — Discovery"], "summary": "Clear discovery caches", "responses": { "200": { "description": "OK" } } } },
+
+    "/api/v1/literature-mining/search-keywords/": {
+      "get": {
+        "tags": ["2. Literature Mining"], "summary": "Search keywords (legacy, LLM-scored)",
+        "parameters": [
+          { "name": "article_keywords", "in": "query", "required": true, "schema": { "type": "string" }, "description": "CSV", "example": "EGFR" },
+          { "name": "search_keywords", "in": "query", "schema": { "type": "string", "default": "" } },
+          { "name": "max_results", "in": "query", "schema": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 } }
+        ],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SearchResponse" } } } } }
+      }
+    },
+    "/api/v1/search-keywords/": {
+      "get": {
+        "tags": ["2. Literature Mining"], "summary": "Search keywords (legacy alias, no prefix)",
+        "parameters": [
+          { "name": "article_keywords", "in": "query", "required": true, "schema": { "type": "string" }, "example": "EGFR" },
+          { "name": "search_keywords", "in": "query", "schema": { "type": "string", "default": "" } },
+          { "name": "max_results", "in": "query", "schema": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 } }
+        ],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SearchResponse" } } } } }
+      }
+    },
+    "/api/v1/literature-mining/litminex/query": {
+      "post": {
+        "tags": ["2. Literature Mining"], "summary": "LitMineX query (spec pipeline)",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LitMineXRequest" } } } },
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LitMineXResponse" } } } },
+          "422": { "description": "Needs clarification", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClarificationResponse" } } } }
+        }
+      }
+    },
+    "/api/v1/litminex/query": {
+      "post": {
+        "tags": ["2. Literature Mining"], "summary": "LitMineX query (legacy alias)",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LitMineXRequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LitMineXResponse" } } } } }
+      }
+    },
+    "/api/v1/literature-mining/litminex/followup": {
+      "post": {
+        "tags": ["2. Literature Mining"], "summary": "LitMineX follow-up QA",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LitMineXFollowUpRequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LitMineXFollowUpResponse" } } } } }
+      }
+    },
+    "/api/v1/litminex/followup": {
+      "post": {
+        "tags": ["2. Literature Mining"], "summary": "LitMineX follow-up QA (legacy alias)",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LitMineXFollowUpRequest" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/literature-mining/health/": { "get": { "tags": ["2. Literature Mining"], "summary": "Module health", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/health/": { "get": { "tags": ["2. Literature Mining"], "summary": "Module health (legacy alias)", "responses": { "200": { "description": "OK" } } } },
+
+    "/api/v1/drug-curation/fetch_compounds": {
+      "post": {
+        "tags": ["3. Drug Curation"], "summary": "Fetch compounds (legacy, LLM-generated)",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FetchCompoundsRequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CurationResponse" } } } } }
+      }
+    },
+    "/api/v1/fetch_compounds": {
+      "post": {
+        "tags": ["3. Drug Curation"], "summary": "Fetch compounds (legacy alias, no prefix)",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FetchCompoundsRequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CurationResponse" } } } } }
+      }
+    },
+    "/api/v1/drug-curation/verify_compounds": {
+      "post": {
+        "tags": ["3. Drug Curation"], "summary": "Verify compounds",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CompoundVerificationRequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/VerificationResponse" } } } } }
+      }
+    },
+    "/api/v1/drug-curation/curatex/profile": {
+      "post": {
+        "tags": ["3. Drug Curation"], "summary": "CurateX Tool 1 - profile",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProfileRequest" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/drug-curation/curatex/score": {
+      "post": {
+        "tags": ["3. Drug Curation"], "summary": "CurateX Tools 2+3 - score",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ScoreRequest" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/drug-curation/curatex/run": {
+      "post": {
+        "tags": ["3. Drug Curation"], "summary": "CurateX full chain (spec pipeline, no LLM)",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CurateXRunRequest" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/curatex/run": {
+      "post": {
+        "tags": ["3. Drug Curation"], "summary": "CurateX full chain (legacy alias)",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CurateXRunRequest" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/drug-curation/curatex/criteria": { "get": { "tags": ["3. Drug Curation"], "summary": "CurateX scoring criteria table", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/drug-curation/curatex/validate-weights": {
+      "post": {
+        "tags": ["3. Drug Curation"], "summary": "Validate criteria weights",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WeightValidationRequest" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/drug-curation/health": { "get": { "tags": ["3. Drug Curation"], "summary": "Module health", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/drug-curation/validate_url": {
+      "post": {
+        "tags": ["3. Drug Curation"], "summary": "Validate a URL",
+        "parameters": [
+          { "name": "url", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "drug_name", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+
+    "/api/v1/screening/download-protein-drugs/": {
+      "post": {
+        "tags": ["4. Screening Suite"], "summary": "Upload protein/drug xlsx",
+        "requestBody": { "content": { "multipart/form-data": { "schema": { "type": "object", "properties": { "file": { "type": "string", "format": "binary" } } } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DownloadProteinDrugResponse" } } } } }
+      }
+    },
+    "/api/v1/screening/process-protein/": {
+      "post": {
+        "tags": ["4. Screening Suite"], "summary": "Process protein (sync)",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProcessProteinRequestBody" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProcessProteinResponse" } } } } }
+      }
+    },
+    "/api/v1/screening/process-protein-v2/": {
+      "post": {
+        "tags": ["4. Screening Suite"], "summary": "Process protein (queued, async)",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProcessProteinRequestBody" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/process-protein-v2/": {
+      "post": {
+        "tags": ["4. Screening Suite"], "summary": "Process protein queued (legacy alias)",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProcessProteinRequestBody" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/screening/queue-status": { "get": { "tags": ["4. Screening Suite"], "summary": "Queue status", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/screening/stop-processing": { "delete": { "tags": ["4. Screening Suite"], "summary": "Stop processing", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/screening/resume-processing": { "post": { "tags": ["4. Screening Suite"], "summary": "Resume processing", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/screening/all-tasks": { "get": { "tags": ["4. Screening Suite"], "summary": "Get all queued tasks", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/screening/list-processed-proteins/": { "get": { "tags": ["4. Screening Suite"], "summary": "List processed proteins", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/screening/generate-ligplot-report/": {
+      "post": {
+        "tags": ["4. Screening Suite"], "summary": "Generate PLIP ligplot report",
+        "requestBody": {
+          "content": { "multipart/form-data": { "schema": { "type": "object", "properties": { "affinity_record": { "type": "object" }, "protein_name": { "type": "string" } } } } }
+        },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/screening/clear-protein-data": { "delete": { "tags": ["4. Screening Suite"], "summary": "Clear protein data", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/screening/create-protein-bundle/{protein_name}": {
+      "post": {
+        "tags": ["4. Screening Suite"], "summary": "Create protein output bundle",
+        "parameters": [{ "name": "protein_name", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/screening/download-protein-bundle/{protein_name}": {
+      "get": {
+        "tags": ["4. Screening Suite"], "summary": "Download protein bundle (zip)",
+        "parameters": [{ "name": "protein_name", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/zip": {} } } }
+      }
+    },
+
+    "/api/v1/novelty-search-agent/novsearch/run": {
+      "post": {
+        "tags": ["5. Novelty Search Agent (spec)"], "summary": "NovSearch run (spec pipeline)",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NovSearchRequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NovSearchResponse" } } } } }
+      }
+    },
+    "/api/v1/novsearch/run": {
+      "post": {
+        "tags": ["5. Novelty Search Agent (spec)"], "summary": "NovSearch run (legacy alias)",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NovSearchRequest" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/novelty-search-agent/novsearch/query": {
+      "post": {
+        "tags": ["5. Novelty Search Agent (spec)"], "summary": "NovSearch query (Postman-collection compatible alias)",
+        "description": "Kept for compatibility with existing Postman requests; routes to the same handler as /novsearch/run.",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NovSearchRequest" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/novelty-search-agent/novsearch/ask": {
+      "post": {
+        "tags": ["5. Novelty Search Agent (spec)"], "summary": "NovSearch QA",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NovSearchQARequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NovSearchQAResponse" } } } } }
+      }
+    },
+    "/api/v1/novsearch/ask": {
+      "post": {
+        "tags": ["5. Novelty Search Agent (spec)"], "summary": "NovSearch QA (legacy alias)",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NovSearchQARequest" } } } },
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/novelty-search-agent/novsearch/status": { "get": { "tags": ["5. Novelty Search Agent (spec)"], "summary": "Indexing/backend status", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/novsearch/status": { "get": { "tags": ["5. Novelty Search Agent (spec)"], "summary": "Indexing/backend status (legacy alias)", "responses": { "200": { "description": "OK" } } } },
+
+    "/api/v1/novelty-search-agent/agent/run": {
+      "post": {
+        "tags": ["5. Novelty Search Agent (legacy)"], "summary": "Agent run (Google Patents/HF/Qdrant/Gemini pipeline)",
+        "parameters": [
+          { "name": "user_query", "in": "query", "required": true, "schema": { "type": "string" }, "example": "EGFR inhibitor" },
+          { "name": "num_results", "in": "query", "schema": { "type": "integer", "default": 5 } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/agent/run": {
+      "post": {
+        "tags": ["5. Novelty Search Agent (legacy)"], "summary": "Agent run (legacy alias)",
+        "parameters": [
+          { "name": "user_query", "in": "query", "required": true, "schema": { "type": "string" }, "example": "EGFR inhibitor" },
+          { "name": "num_results", "in": "query", "schema": { "type": "integer", "default": 5 } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/novelty-search-agent/agent/ask": {
+      "get": {
+        "tags": ["5. Novelty Search Agent (legacy)"], "summary": "Agent QA - single patent",
+        "parameters": [
+          { "name": "query", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "patent_id", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "top_k", "in": "query", "schema": { "type": "integer", "default": 10 } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/novelty-search-agent/agent/ask_all": {
+      "get": {
+        "tags": ["5. Novelty Search Agent (legacy)"], "summary": "Agent QA - cross-patent",
+        "parameters": [
+          { "name": "query", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "top_k", "in": "query", "schema": { "type": "integer", "default": 10 } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/v1/novelty-search-agent/agent/status": { "get": { "tags": ["5. Novelty Search Agent (legacy)"], "summary": "Vector store / HTML cache stats", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/novelty-search-agent/agent/health": { "get": { "tags": ["5. Novelty Search Agent (legacy)"], "summary": "Agent health", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/novelty-search-agent/agent/usage": { "get": { "tags": ["5. Novelty Search Agent (legacy)"], "summary": "Gemini/SerpAPI cost tracking", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/novelty-search-agent/agent/history": { "get": { "tags": ["5. Novelty Search Agent (legacy)"], "summary": "Agent run history", "responses": { "200": { "description": "OK" } } } },
+    "/api/v1/novelty-search-agent/agent/download_history": { "get": { "tags": ["5. Novelty Search Agent (legacy)"], "summary": "Download run history as CSV", "responses": { "200": { "description": "OK", "content": { "text/csv": {} } } } } },
+
+    "/v1/auth/login": {
+      "post": {
+        "tags": ["DRP Auth & Onboarding"], "summary": "Login",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginRequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginResponse" } } } } }
+      }
+    },
+    "/v1/auth/logout": { "post": { "tags": ["DRP Auth & Onboarding"], "summary": "Logout", "security": [{ "drpToken": [] }], "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SuccessResponse" } } } } } } },
+    "/v1/auth/refresh": {
+      "post": {
+        "tags": ["DRP Auth & Onboarding"], "summary": "Refresh token",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RefreshRequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RefreshResponse" } } } } }
+      }
+    },
+    "/v1/auth/forgot-password": {
+      "post": {
+        "tags": ["DRP Auth & Onboarding"], "summary": "Forgot password (always 200)",
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ForgotPasswordRequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SuccessResponse" } } } } }
+      }
+    },
+    "/v1/users/me": { "get": { "tags": ["DRP Auth & Onboarding"], "summary": "Current user profile", "security": [{ "drpToken": [] }], "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DrpUser" } } } } } } },
+    "/v1/users/me/onboarding-status": { "get": { "tags": ["DRP Auth & Onboarding"], "summary": "Onboarding status", "security": [{ "drpToken": [] }], "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OnboardingStatus" } } } } } } },
+    "/v1/users/me/research-focus": {
+      "post": {
+        "tags": ["DRP Auth & Onboarding"], "summary": "Save research focus (therapeutic areas)", "security": [{ "drpToken": [] }],
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ResearchFocusRequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SuccessResponse" } } } } }
+      }
+    },
+    "/v1/users/me/onboarding/complete": { "post": { "tags": ["DRP Auth & Onboarding"], "summary": "Complete onboarding", "security": [{ "drpToken": [] }], "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SuccessResponse" } } } } } } },
+    "/v1/therapeutic-areas": { "get": { "tags": ["DRP Auth & Onboarding"], "summary": "List therapeutic areas", "security": [{ "drpToken": [] }], "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "type": "string" } } } } } } } },
+
+    "/v1/dashboard/summary": { "get": { "tags": ["DRP Dashboard"], "summary": "Dashboard summary", "security": [{ "drpToken": [] }], "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DashboardSummary" } } } } } } },
+    "/v1/dashboard/quick-actions": { "get": { "tags": ["DRP Dashboard"], "summary": "Quick actions", "security": [{ "drpToken": [] }], "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/QuickAction" } } } } } } } },
+    "/v1/dashboard/pipelines": { "get": { "tags": ["DRP Dashboard"], "summary": "Pipeline progress", "security": [{ "drpToken": [] }], "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/PipelineProgress" } } } } } } } },
+    "/v1/dashboard/pipelines/manage": { "get": { "tags": ["DRP Dashboard"], "summary": "Manage pipelines (detailed)", "security": [{ "drpToken": [] }], "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/PipelineDetail" } } } } } } } },
+
+    "/v1/modules": { "get": { "tags": ["DRP Modules & Jobs"], "summary": "List modules", "security": [{ "drpToken": [] }], "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Module" } } } } } } } },
+    "/v1/modules/search": {
+      "get": {
+        "tags": ["DRP Modules & Jobs"], "summary": "Search modules (@mention)", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "q", "in": "query", "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Module" } } } } } }
+      }
+    },
+    "/v1/agents/jobs/{jobId}/status": {
+      "get": {
+        "tags": ["DRP Modules & Jobs"], "summary": "Job status", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "jobId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobStatusResponse" } } } } }
+      }
+    },
+    "/v1/agents/jobs/{jobId}/result": {
+      "get": {
+        "tags": ["DRP Modules & Jobs"], "summary": "Job result", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "jobId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobResultResponse" } } } },
+          "409": { "description": "Job not completed yet" }
+        }
+      }
+    },
+
+    "/v1/sessions": {
+      "get": {
+        "tags": ["DRP Sessions"], "summary": "List sessions", "security": [{ "drpToken": [] }],
+        "parameters": [
+          { "name": "search", "in": "query", "schema": { "type": "string" } },
+          { "name": "module", "in": "query", "schema": { "type": "string" } },
+          { "name": "status", "in": "query", "schema": { "type": "string" } },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } }
+        ],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SessionPage" } } } } }
+      },
+      "post": {
+        "tags": ["DRP Sessions"], "summary": "Create session (dispatches module job)", "security": [{ "drpToken": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateSessionRequest" } } } },
+        "responses": { "201": { "description": "Created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Session" } } } } }
+      }
+    },
+    "/v1/sessions/draft": {
+      "post": {
+        "tags": ["DRP Sessions"], "summary": "Save draft session", "security": [{ "drpToken": [] }],
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DraftSessionRequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DraftSessionResponse" } } } } }
+      },
+      "patch": {
+        "tags": ["DRP Sessions"], "summary": "Update draft session", "security": [{ "drpToken": [] }],
+        "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DraftSessionRequest" } } } },
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DraftSessionResponse" } } } },
+          "404": { "description": "No draft exists" }
+        }
+      }
+    },
+    "/v1/sessions/{sessionId}": {
+      "get": {
+        "tags": ["DRP Sessions"], "summary": "Get session detail", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "sessionId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Session" } } } } }
+      }
+    },
+
+    "/v1/agents/txkg/query": {
+      "post": {
+        "tags": ["DRP Agents - TxKG"], "summary": "TxKG - Query (creates job)", "security": [{ "drpToken": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TxkgQueryRequest" } } } },
+        "responses": { "202": { "description": "Job accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobAccepted" } } } } }
+      }
+    },
+    "/v1/agents/txkg/targets": {
+      "get": {
+        "tags": ["DRP Agents - TxKG"], "summary": "TxKG - Get targets for a job", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "jobId", "in": "query", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/DrpTarget" } } } } } }
+      }
+    },
+    "/v1/agents/txkg/targets/{uniprotId}": {
+      "get": {
+        "tags": ["DRP Agents - TxKG"], "summary": "TxKG - Target detail", "security": [{ "drpToken": [] }],
+        "parameters": [
+          { "name": "uniprotId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "jobId", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TargetDetail" } } } } }
+      }
+    },
+    "/v1/agents/txkg/insights/{jobId}": {
+      "get": {
+        "tags": ["DRP Agents - TxKG"], "summary": "TxKG - Insights panel (§10 recommendations, interpretation, sources)", "security": [{ "drpToken": [] }],
+        "parameters": [
+          { "name": "jobId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "tab", "in": "query", "schema": { "type": "string", "enum": ["interpretation", "recommendations", "sources"] } }
+        ],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InsightPanel" } } } } }
+      }
+    },
+
+    "/v1/agents/subgraph/generate": {
+      "post": {
+        "tags": ["DRP Knowledge Graph"], "summary": "Generate subgraph (creates job)", "security": [{ "drpToken": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SubgraphRequest" } } } },
+        "responses": { "202": { "description": "Job accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobAccepted" } } } } }
+      }
+    },
+    "/v1/agents/subgraph/{jobId}": {
+      "get": {
+        "tags": ["DRP Knowledge Graph"], "summary": "Get subgraph", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "jobId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeGraph" } } } } }
+      }
+    },
+    "/v1/agents/subgraph/{jobId}/stats": {
+      "get": {
+        "tags": ["DRP Knowledge Graph"], "summary": "Subgraph stats", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "jobId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/GraphStats" } } } } }
+      }
+    },
+    "/v1/agents/subgraph/{jobId}/explore": {
+      "post": {
+        "tags": ["DRP Knowledge Graph"], "summary": "Explore subgraph from a node", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "jobId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ExploreRequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeGraph" } } } } }
+      }
+    },
+    "/v1/agents/metapath/analyze": {
+      "post": {
+        "tags": ["DRP Knowledge Graph"], "summary": "Analyze metapaths (creates job)", "security": [{ "drpToken": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MetapathRequest" } } } },
+        "responses": { "202": { "description": "Job accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobAccepted" } } } } }
+      }
+    },
+    "/v1/agents/metapath/{jobId}": {
+      "get": {
+        "tags": ["DRP Knowledge Graph"], "summary": "Metapath summary", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "jobId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MetapathSummary" } } } } }
+      }
+    },
+    "/v1/agents/metapath/{jobId}/scores": {
+      "get": {
+        "tags": ["DRP Knowledge Graph"], "summary": "Metapath target prediction scores", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "jobId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/TargetPredictionScore" } } } } } }
+      }
+    },
+    "/v1/agents/metapath/{jobId}/traversals": {
+      "get": {
+        "tags": ["DRP Knowledge Graph"], "summary": "Metapath traversals", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "jobId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/MetapathTraversal" } } } } } }
+      }
+    },
+
+    "/v1/agents/litminex/targets/custom": {
+      "post": {
+        "tags": ["DRP Agents - LitMinex"], "summary": "Add custom target", "security": [{ "drpToken": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CustomTargetRequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SuccessResponse" } } } } }
+      },
+      "get": {
+        "tags": ["DRP Agents - LitMinex"], "summary": "List custom targets", "security": [{ "drpToken": [] }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "type": "string" } } } } } }
+      }
+    },
+    "/v1/agents/litminex/query": {
+      "post": {
+        "tags": ["DRP Agents - LitMinex"], "summary": "LitMinex - Query (creates job)", "security": [{ "drpToken": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LitminexQueryRequest" } } } },
+        "responses": { "202": { "description": "Job accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobAccepted" } } } } }
+      }
+    },
+    "/v1/agents/litminex/{jobId}/results": {
+      "get": {
+        "tags": ["DRP Agents - LitMinex"], "summary": "LitMinex - Results (paged)", "security": [{ "drpToken": [] }],
+        "parameters": [
+          { "name": "jobId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } }
+        ],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArticlePage" } } } } }
+      }
+    },
+    "/v1/agents/litminex/{jobId}/insights": {
+      "get": {
+        "tags": ["DRP Agents - LitMinex"], "summary": "LitMinex - Insights", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "jobId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/InsightPanel" } } } } }
+      }
+    },
+    "/v1/agents/litminex/{jobId}/results/{articleId}/preview": {
+      "get": {
+        "tags": ["DRP Agents - LitMinex"], "summary": "LitMinex - Article preview", "security": [{ "drpToken": [] }],
+        "parameters": [
+          { "name": "jobId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "articleId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArticlePreview" } } } } }
+      }
+    },
+
+    "/v1/agents/curatex/target-profile": {
+      "post": {
+        "tags": ["DRP Agents - CuraTeX"], "summary": "CuraTeX - Target profile (creates job)", "security": [{ "drpToken": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TargetProfileRequest" } } } },
+        "responses": { "202": { "description": "Job accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobAccepted" } } } } }
+      }
+    },
+    "/v1/agents/curatex/compounds": {
+      "post": {
+        "tags": ["DRP Agents - CuraTeX"], "summary": "CuraTeX - Curate compounds (creates job)", "security": [{ "drpToken": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CurateCompoundsRequest" } } } },
+        "responses": { "202": { "description": "Job accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobAccepted" } } } } }
+      }
+    },
+
+    "/v1/agents/screensuite/screen": {
+      "post": {
+        "tags": ["DRP Agents - ScreenSuite"], "summary": "ScreenSuite - Screen (creates job + DrpPipeline row)", "security": [{ "drpToken": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ScreenRequest" } } } },
+        "responses": { "202": { "description": "Job accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobAccepted" } } } } }
+      }
+    },
+    "/v1/agents/screensuite/{jobId}/hits": {
+      "get": {
+        "tags": ["DRP Agents - ScreenSuite"], "summary": "ScreenSuite - Docking hits", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "jobId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/ScreeningHit" } } } } } }
+      }
+    },
+
+    "/v1/agents/novsearch/assess": {
+      "post": {
+        "tags": ["DRP Agents - NovSearch"], "summary": "NovSearch - Assess (creates job)", "security": [{ "drpToken": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoveltyAssessRequest" } } } },
+        "responses": { "202": { "description": "Job accepted", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobAccepted" } } } } }
+      }
+    },
+    "/v1/agents/novsearch/{jobId}/report": {
+      "get": {
+        "tags": ["DRP Agents - NovSearch"], "summary": "NovSearch - Report", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "jobId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoveltyReport" } } } } }
+      }
+    },
+    "/v1/agents/novsearch/ask": {
+      "post": {
+        "tags": ["DRP Agents - NovSearch"], "summary": "NovSearch - QA", "security": [{ "drpToken": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoveltyQARequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NoveltyQAResponse" } } } } }
+      }
+    },
+
+    "/v1/articles/{articleId}": {
+      "get": {
+        "tags": ["DRP Articles"], "summary": "Article detail", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "articleId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ArticleDetail" } } } } }
+      }
+    },
+    "/v1/articles/{articleId}/pmc-link": {
+      "get": {
+        "tags": ["DRP Articles"], "summary": "Article PMC link", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "articleId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ExternalLink" } } } } }
+      }
+    },
+    "/v1/articles/{articleId}/save": {
+      "post": {
+        "tags": ["DRP Articles"], "summary": "Save article to a project", "security": [{ "drpToken": [] }],
+        "parameters": [
+          { "name": "articleId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "projectId", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SuccessResponse" } } } } }
+      }
+    },
+    "/v1/articles/{articleId}/chat": {
+      "post": {
+        "tags": ["DRP Articles"], "summary": "Chat with article (LLM or extractive fallback)", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "articleId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatRequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatMessage" } } } } }
+      }
+    },
+    "/v1/articles/{articleId}/chat/history": {
+      "get": {
+        "tags": ["DRP Articles"], "summary": "Article chat history", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "articleId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/ChatMessage" } } } } } }
+      }
+    },
+
+    "/v1/projects": {
+      "get": {
+        "tags": ["DRP Projects"], "summary": "List projects", "security": [{ "drpToken": [] }],
+        "parameters": [
+          { "name": "search", "in": "query", "schema": { "type": "string" } },
+          { "name": "module", "in": "query", "schema": { "type": "string" } },
+          { "name": "status", "in": "query", "schema": { "type": "string" } },
+          { "name": "sortBy", "in": "query", "schema": { "type": "string", "default": "Latest Activity" } },
+          { "name": "page", "in": "query", "schema": { "type": "integer", "default": 1 } }
+        ],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectPage" } } } } }
+      },
+      "post": {
+        "tags": ["DRP Projects"], "summary": "Create project", "security": [{ "drpToken": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateProjectRequest" } } } },
+        "responses": { "201": { "description": "Created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Project" } } } } }
+      }
+    },
+    "/v1/projects/{projectId}": {
+      "get": {
+        "tags": ["DRP Projects"], "summary": "Get project", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "projectId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Project" } } } } }
+      }
+    },
+    "/v1/projects/{projectId}/items": {
+      "get": {
+        "tags": ["DRP Projects"], "summary": "List project items", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "projectId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/ProjectItem" } } } } } }
+      }
+    },
+    "/v1/projects/{projectId}/results": {
+      "post": {
+        "tags": ["DRP Projects"], "summary": "Save a result into a project", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "projectId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SaveResultRequest" } } } },
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SaveResultResponse" } } } } }
+      }
+    },
+
+    "/v1/files/upload": {
+      "post": {
+        "tags": ["DRP Files & Export"], "summary": "Upload a file", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "sessionId", "in": "query", "schema": { "type": "string" } }],
+        "requestBody": { "content": { "multipart/form-data": { "schema": { "type": "object", "properties": { "file": { "type": "string", "format": "binary" } } } } } },
+        "responses": { "201": { "description": "Created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UploadResponse" } } } } }
+      }
+    },
+    "/v1/files/{fileId}/download": {
+      "get": {
+        "tags": ["DRP Files & Export"], "summary": "Download uploaded file", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "fileId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/v1/exports": {
+      "post": {
+        "tags": ["DRP Files & Export"], "summary": "Create export (csv/json/svg; png unsupported → 415)", "security": [{ "drpToken": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ExportRequest" } } } },
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ExportResponse" } } } },
+          "415": { "description": "Unsupported format (png)" }
+        }
+      }
+    },
+    "/v1/exports/pdf": {
+      "post": {
+        "tags": ["DRP Files & Export"], "summary": "Create PDF export (503 if reportlab missing)", "security": [{ "drpToken": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PdfExportRequest" } } } },
+        "responses": {
+          "200": { "description": "OK", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ExportResponse" } } } },
+          "503": { "description": "reportlab not installed" }
+        }
+      }
+    },
+    "/v1/exports/{exportId}/download": {
+      "get": {
+        "tags": ["DRP Files & Export"], "summary": "Download export", "security": [{ "drpToken": [] }],
+        "parameters": [{ "name": "exportId", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK" } }
+      }
+    }
+  }
+}

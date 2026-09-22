@@ -1,0 +1,80 @@
+fastapi
+uvicorn
+pydantic
+pydantic-settings
+sqlalchemy
+alembic
+python-dotenv
+passlib[bcrypt]
+python-jose[cryptography]
+reportlab
+pandas
+requests
+biopython
+PyPDF2
+python-multipart
+openpyxl
+groq
+bs4
+lxml
+xmltodict
+langfuse<3
+httpx
+google-genai
+networkx
+scipy
+rdkit
+huggingface_hub
+qdrant-client
+rank-bm25
+sentence-transformers
+
+# Unity Catalog persistence (bronze/silver/gold module output) — app/shared/uc_store.py
+databricks-sdk
+
+# NovSearch — Databricks Vector Search for patent chunks. Imported lazily, so a
+# constrained image fails one NovSearch job rather than breaking API import.
+databricks-vectorsearch
+
+# ── ScreenSuite (module 4 — docking) ─────────────────────────────────────────
+# Replaced PyMOL and PLIP: receptor prep is PDBFixer/OpenMM, interaction
+# profiling is ProLIF. All are imported lazily (see the module docstrings), so
+# an image without them still serves the API — /api/v1/screening/health reports
+# exactly which parts of the stack are runnable.
+#
+# Verified installable from PyPI on win_amd64/py3.12 (2026-09): openmm 8.6.0 and
+# pdbfixer 1.12.0 now ship wheels, so the old conda-only caveat is gone.
+pdbfixer
+openmm
+prolif
+MDAnalysis
+meeko
+#
+# Open Babel: this wheel ships BOTH the `obabel` executable (into Scripts/) and
+# the in-process `openbabel.pybel` bindings. docking_service tries the
+# executable first and falls back to the bindings, so conversion still works on
+# a host that refuses to execute unsigned binaries (see below).
+openbabel-wheel
+#
+# NOT pip-installable — AutoDock Vina itself. `pip install vina` builds from
+# source and needs Boost + a C++ toolchain (no Windows wheel). Official
+# prebuilt binaries, including a Windows one, are published per release:
+#   https://github.com/ccsb-scripps/AutoDock-Vina/releases
+#   linux_x86_64 | linux_aarch64 | mac_x86_64 | mac_aarch64 | win.exe
+# Drop it in DRP_Main/bin/ (searched automatically) or set SCREENING_VINA_PATH.
+#
+# NOTE for locked-down Windows workstations: endpoint-security policy here
+# denies execution of both vina.exe and obabel.exe with `WinError 5 / Access is
+# denied`, even though the files are present. Conversion survives via the
+# in-process bindings; docking does not, since nothing substitutes for Vina.
+# That needs an allowlist entry for the binary path, or a Linux host / the
+# Databricks job. /screening/health reports this as
+# `reason: "blocked_by_policy"` rather than as a missing dependency.
+
+# LitMineX Tool 2 — biomedical NER and dependency parsing (spec §4 steps 1-2).
+# The module degrades to rule-based entity tagging when these are absent, so they
+# are safe to omit on constrained images; install them for spec-grade tagging:
+#   pip install scispacy
+#   pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_ner_bc5cdr_md-0.5.4.tar.gz
+#   pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_ner_bionlp13cg_md-0.5.4.tar.gz
+scispacy

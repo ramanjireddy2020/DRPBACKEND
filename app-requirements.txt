@@ -1,0 +1,36 @@
+fastapi
+uvicorn
+pydantic
+pydantic-settings
+sqlalchemy
+alembic
+python-dotenv
+passlib[bcrypt]
+python-jose[cryptography]
+reportlab
+pandas
+requests
+biopython
+PyPDF2
+python-multipart
+openpyxl
+groq
+bs4
+lxml
+xmltodict
+langfuse==2.60.10
+httpx
+google-genai
+networkx
+rdkit
+huggingface_hub
+qdrant-client
+rank-bm25
+sentence-transformers
+databricks-vectorsearch
+boto3
+databricks-sdk
+
+# pymol-open-source and plip are dropped here: not pip-installable on Databricks
+# Apps (read-only FS, no compiler). Docking/interaction-report endpoints degrade
+# gracefully via lazy imports (see CLAUDE.md "PyMOL / PLIP — always lazy import").

@@ -1,0 +1,55 @@
+# The main Databricks job for DRP_Main InnoDD API.
+# Runs the complete pharmaceutical research pipeline.
+
+resources:
+  jobs:
+    DRP_Main_innoddapi_job:
+      name: DRP_Main InnoDD API Job
+
+      trigger:
+        # Run this job every day, exactly one day from the last run
+        periodic:
+          interval: 1
+          unit: DAYS
+
+      #email_notifications:
+      #  on_failure:
+      #    - your_email@example.com
+
+      parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: schema
+          default: ${var.schema}
+
+      tasks:
+        - task_key: databricks_init
+          notebook_task:
+            notebook_path: ../src/sample_notebook.ipynb
+
+        - task_key: innoddapi_cli
+          depends_on:
+            - task_key: databricks_init
+          python_wheel_task:
+            package_name: DRP_Main
+            entry_point: main
+            parameters:
+              - "--catalog"
+              - "${var.catalog}"
+              - "--schema"
+              - "${var.schema}"
+          environment_key: default
+          
+        - task_key: refresh_pipeline
+          depends_on:
+            - task_key: databricks_init
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.DRP_Main_etl.id}
+
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "4"
+            dependencies:
+              # Include the .whl file generated for the DRP_Main package
+              - ../dist/*.whl

@@ -1,0 +1,136 @@
+[project]
+name = "DRP_Main"
+version = "2.3.0"
+authors = [{ name = "ltangudigae@innominds.com" }]
+description = "InnoDD API — Pharmaceutical Research Platform (Databricks-deployable)"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    # FastAPI and web framework
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "pydantic-settings",
+    "python-multipart",
+    "httpx",
+    
+    # Database
+    "sqlalchemy",
+    "alembic",
+    "python-dotenv",
+    
+    # Auth
+    "passlib[bcrypt]",
+    "python-jose[cryptography]",
+    
+    # Data processing
+    "pandas",
+    "openpyxl",
+    "networkx",
+    
+    # API clients
+    "requests",
+    "groq",
+    "google-genai",
+    
+    # Web scraping / parsing
+    "bs4",
+    "lxml",
+    "xmltodict",
+    
+    # Scientific / Bioinformatics
+    "biopython",
+    "rdkit",
+
+    # ScreenSuite (module 4 — docking). Replaced PyMOL + PLIP.
+    # `vina` and `openbabel-wheel` are Linux-only wheels; they are intentionally
+    # NOT hard dependencies so the package still installs on Windows/macOS for
+    # API development. Install them where docking actually runs (the Databricks
+    # job) — see the screensuite extra below. Everything else here is portable.
+    "pdbfixer",
+    "openmm",
+    "prolif",
+    "MDAnalysis",
+    "meeko",
+
+    # PDF processing
+    "PyPDF2",
+    
+    # ML / NLP
+    "sentence-transformers",
+    # LitMineX Tool 2 NER. The scispaCy *models* (en_ner_bc5cdr_md,
+    # en_ner_bionlp13cg_md) ship as URL wheels — see requirements.txt. Without them
+    # the module falls back to rule-based entity tagging.
+    "scispacy",
+    "rank-bm25",
+    "qdrant-client",
+    "huggingface_hub",
+    
+    # Observability
+    "langfuse",
+
+    # Agent orchestration
+    "langgraph",
+    "langgraph-checkpoint-sqlite",
+    
+    # Databricks
+    "databricks-sdk",
+    "databricks-connect>=17.3,<17.4",
+    "databricks-dlt",
+]
+
+[project.optional-dependencies]
+# Linux-only wheels, for wherever docking actually executes (the Databricks
+# job). `vina` publishes manylinux/musllinux wheels for cp38-cp312 and no
+# Windows/macOS wheel at all; `openbabel-wheel` ships the obabel binary plus
+# the in-process bindings. Install with: pip install "DRP_Main[screensuite]"
+screensuite = [
+    "vina; sys_platform == 'linux'",
+    "openbabel-wheel",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+    "ipykernel",
+    "databricks-dlt",
+    "databricks-connect>=17.3,<17.4",
+]
+
+[project.scripts]
+main = "DRP_Main.main:main"
+innoddapi = "DRP_Main.app.main:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/DRP_Main"]
+# Data and runtime artifacts that happen to sit under src/ must stay out of the
+# wheel. Without this the TxKG dataset (`biokg_data.zip`, 186 MB) is packaged on
+# every build, which put the wheel over the workspace's 50 MB import limit and
+# made every bundle deploy needlessly slow. The dataset belongs on a volume,
+# reached through BIOKG_DATA_DIR. Python sources are kept.
+exclude = [
+    "**/biokg_data.zip",
+    "**/biokg_data/graphs/**",
+    "**/*.tsv",
+    "**/*.pkl",
+    "**/*.db",
+    "**/*.log",
+    "**/*.gz",
+    "**/logs/**",
+    "**/data/processed_proteins_output/**",
+    "**/data/protein_structures/**",
+    "**/data/drug_structures/**",
+    "**/data/screening_runs/**",
+    "**/__pycache__/**",
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

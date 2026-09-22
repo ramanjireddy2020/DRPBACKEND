@@ -1,0 +1,91 @@
+# This is a Databricks asset bundle definition for DRP_Main.
+# See https://docs.databricks.com/dev-tools/bundles/index.html for documentation.
+bundle:
+  name: DRP_Main
+  uuid: 6d4756d5-9d3e-409a-b873-8d9269a00931
+
+include:
+  - resources/*.yml
+
+# Large data artifacts / caches / logs must not be synced as workspace files
+# (the workspace-files API times out on large blobs). Store these in a Unity
+# Catalog Volume and read them from there at runtime instead.
+sync:
+  exclude:
+    - "**/*.pkl"
+    - "**/*.tsv"
+    - "**/*.zip"
+    - "**/*.pdb"
+    - "**/*.pdbqt"
+    - "**/*.log"
+    - "src/DRP_Main/app/data/**"
+    # Databricks Apps downloads the whole source tree when deploying, and its
+    # downloader cannot read a Jupyter notebook stored as a workspace object
+    # ("The Jupyter file may not be a valid notebook or may be an unsupported
+    # version") — one .ipynb fails the entire app deployment. The only one here
+    # is the default-python template's `src/sample_notebook.ipynb`, scaffolding
+    # unrelated to the DRP modules. `sample_job.job.yml` still references it, so
+    # that template job cannot run while this exclusion stands; its trigger is
+    # paused in development mode, and it should be removed with the rest of the
+    # template leftovers (taxis.py, DRP_Main_etl) rather than kept working.
+    - "**/*.ipynb"
+    # Secrets live in Databricks Secrets (see resources/drp_api_app.app.yml), never
+    # uploaded as a file — gitignored locally too, but excluded explicitly here so
+    # sync doesn't depend on that.
+    - ".env"
+    - ".env.local"
+    - ".venv/**"
+    - ".databricks/**"
+
+artifacts:
+  python_artifact:
+    type: whl
+    build: python -m build --wheel
+
+# Variable declarations. These variables are assigned in the dev/prod targets below.
+variables:
+  catalog:
+    description: The catalog to use
+  schema:
+    description: The schema to use
+  uc_warehouse_id:
+    description: SQL Warehouse ID the app/API uses for Unity Catalog writes (uc_store.py)
+    default: ""
+
+targets:
+  dev:
+    # The default target uses 'mode: development' to create a development copy.
+    # - Deployed resources get prefixed with '[dev my_user_name]'
+    # - Any job schedules and triggers are paused by default.
+    # See also https://docs.databricks.com/dev-tools/bundles/deployment-modes.html.
+    mode: development
+    default: true
+    workspace:
+      host: https://dbc-9c7c244a-a883.cloud.databricks.com
+    variables:
+      catalog: workspace
+      schema: ${workspace.current_user.short_name}
+  prod:
+    mode: production
+    workspace:
+      host: https://dbc-9c7c244a-a883.cloud.databricks.com
+      # We explicitly deploy to /Workspace/Users/ltangudigae@innominds.com to make sure we only have a single copy.
+      root_path: /Workspace/Users/ltangudigae@innominds.com/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      catalog: workspace
+      schema: prod
+    permissions:
+      - user_name: ltangudigae@innominds.com
+        level: CAN_MANAGE
+  bpuvvada:
+    # New $200-credit Databricks account. Deploy with env DATABRICKS_BUNDLE_ENGINE=direct
+    # to skip the Terraform provider binary this machine's EDR blocks (see CLAUDE
+    # memory "endpoint-security-blocks-terraform-uv").
+    mode: development
+    workspace:
+      host: https://dbc-96626831-6c96.cloud.databricks.com
+      root_path: /Workspace/Users/bpuvvada@innominds.com/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      catalog: workspace
+      schema: ${workspace.current_user.short_name}
+      uc_warehouse_id: "9ead5d85fc3be5c4"

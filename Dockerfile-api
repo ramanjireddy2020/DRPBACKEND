@@ -1,0 +1,99 @@
+# syntax=docker/dockerfile:1.7
+
+############################
+# Stage 1: dependency builder
+############################
+FROM debian:bookworm-slim AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_ROOT_USER_ACTION=ignore \
+    MAMBA_ROOT_PREFIX=/opt/micromamba \
+    PATH=/opt/micromamba/envs/app-env/bin:/usr/local/bin:$PATH
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        bzip2 \
+        git \
+        build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Micromamba.
+RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
+    | tar -xvj -C /usr/local/bin --strip-components=1 bin/micromamba
+
+# Create Python environment with Open Babel and PLIP.
+RUN --mount=type=cache,target=/opt/micromamba/pkgs \
+    micromamba create -y -n app-env \
+        -c conda-forge \
+        python=3.12 \
+        openbabel \
+        plip && \
+    micromamba clean --all --yes
+
+WORKDIR /workspace
+
+COPY requirements.txt ./requirements.txt
+
+# Exclude GPU/PyTorch packages and packages already managed by Micromamba.
+RUN grep -viE '^[[:space:]]*(torch|triton|sentence-transformers|plip|openbabel|cuda-toolkit|nvidia-cublas[^[:space:]]*|nvidia-cudnn[^[:space:]]*|nvidia-cusolver[^[:space:]]*)([[:space:]]*[=<>!~].*)?[[:space:]]*$' \
+        requirements.txt > requirements-docker.txt && \
+    python -m pip install --upgrade pip setuptools wheel && \
+    python -m pip install -r requirements-docker.txt && \
+    ! python -m pip freeze | grep -iE '^(torch|triton|nvidia-cublas|nvidia-cudnn|nvidia-cusolver|cuda-toolkit)'
+
+# Install AutoDock Vina.
+ARG VINA_VERSION=1.2.5
+RUN curl -fL \
+    "https://github.com/ccsb-scripps/AutoDock-Vina/releases/download/v${VINA_VERSION}/vina_${VINA_VERSION}_linux_x86_64" \
+    -o /usr/local/bin/vina && \
+    chmod 755 /usr/local/bin/vina
+
+#########################
+# Stage 2: runtime image
+#########################
+FROM debian:bookworm-slim AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PATH=/opt/micromamba/envs/app-env/bin:/usr/local/bin:$PATH
+
+# Runtime-only libraries.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+        libgomp1 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy only the prepared runtime environment and Vina binary.
+COPY --from=builder /opt/micromamba/envs/app-env /opt/micromamba/envs/app-env
+COPY --from=builder /usr/local/bin/vina /usr/local/bin/vina
+
+# Create non-root application user.
+RUN groupadd --system --gid 1001 innoddapi && \
+    useradd --system \
+        --uid 1001 \
+        --gid innoddapi \
+        --create-home \
+        --home-dir /home/innoddapi \
+        --shell /bin/bash \
+        innoddapi
+
+WORKDIR /workspace
+
+COPY --chown=innoddapi:innoddapi . /workspace
+
+# Validate runtime tools.
+RUN python --version && \
+    obabel -V && \
+    vina --version && \
+    python -c "import plip; print('PLIP import successful')"
+
+USER innoddapi
+
+CMD ["/bin/bash"]

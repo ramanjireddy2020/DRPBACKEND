@@ -1,0 +1,204 @@
+# Databricks App — hosts the InnoDD FastAPI app on Databricks' managed serverless
+# app runtime (no cluster to provision or size). Replaces running `uvicorn` locally
+# for reaching /v1/agents/* against Unity Catalog.
+#
+# Secrets are never embedded here or in source: every sensitive value is granted
+# to the app's own service principal via the `secret` resource blocks below and
+# read at runtime from the Databricks-injected env — see .env.example for the
+# full variable list this mirrors.
+resources:
+  apps:
+    drp_api_app:
+      name: innodd-api
+      description: InnoDD API — Drug Repurposing Platform (FastAPI, /v1 agent endpoints)
+      source_code_path: ../
+      resources:
+        - name: uc-warehouse
+          sql_warehouse:
+            id: ${var.uc_warehouse_id}
+            permission: CAN_USE
+        - name: groq-api-key
+          secret:
+            scope: innodd-api
+            key: GROQ_API_KEY
+            permission: READ
+        - name: google-api-key
+          secret:
+            scope: innodd-api
+            key: GOOGLE_API_KEY
+            permission: READ
+        - name: serpapi-api-key
+          secret:
+            scope: innodd-api
+            key: SERPAPI_API_KEY
+            permission: READ
+        - name: hf-token
+          secret:
+            scope: innodd-api
+            key: HF_TOKEN
+            permission: READ
+        - name: qdrant-url
+          secret:
+            scope: innodd-api
+            key: QDRANT_URL
+            permission: READ
+        - name: qdrant-api-key
+          secret:
+            scope: innodd-api
+            key: QDRANT_API_KEY
+            permission: READ
+        - name: langfuse-secret-key
+          secret:
+            scope: innodd-api
+            key: LANGFUSE_SECRET_KEY
+            permission: READ
+        - name: langfuse-public-key
+          secret:
+            scope: innodd-api
+            key: LANGFUSE_PUBLIC_KEY
+            permission: READ
+        - name: app-secret-key
+          secret:
+            scope: innodd-api
+            key: SECRET_KEY
+            permission: READ
+        - name: azure-openai-endpoint
+          secret:
+            scope: innodd-api
+            key: AZURE_OPENAI_ENDPOINT
+            permission: READ
+        - name: azure-openai-api-key
+          secret:
+            scope: innodd-api
+            key: AZURE_OPENAI_API_KEY
+            permission: READ
+        # Pay-per-token Foundation Model endpoints reached through
+        # llm_client.databricks() and novelty/databricks_clients.py.
+        - name: llm-endpoint
+          serving_endpoint:
+            name: databricks-meta-llama-3-3-70b-instruct
+            permission: CAN_QUERY
+        - name: embedding-endpoint
+          serving_endpoint:
+            name: databricks-qwen3-embedding-0-6b
+            permission: CAN_QUERY
+        # TxKG's BioKG dataset (~320 MB of TSVs). Granting the service principal
+        # READ_VOLUME is not enough on its own — the volume must be declared here
+        # for Apps to expose /Volumes to the container, or the path exists but
+        # every read fails with EACCES.
+        - name: biokg-volume
+          uc_securable:
+            securable_type: VOLUME
+            securable_full_name: drug_repository.bronze.biokg_raw
+            permission: READ_VOLUME
+      config:
+        command:
+          - "bash"
+          - "-c"
+          # Stay in the source root (not `cd src`) — pip installs into a relative
+          # ./.venv here, and cd'ing before invoking uvicorn breaks that relative
+          # path resolution ("uvicorn: not found"). --app-dir puts src/ on
+          # sys.path without changing the working directory.
+          - "exec uvicorn DRP_Main.app.main:app --app-dir src --host 0.0.0.0 --port $DATABRICKS_APP_PORT"
+        env:
+          - name: GROQ_API_KEY
+            value_from: groq-api-key
+          - name: GOOGLE_API_KEY
+            value_from: google-api-key
+          - name: SERPAPI_API_KEY
+            value_from: serpapi-api-key
+          - name: HF_TOKEN
+            value_from: hf-token
+          - name: QDRANT_URL
+            value_from: qdrant-url
+          - name: QDRANT_API_KEY
+            value_from: qdrant-api-key
+          - name: LANGFUSE_SECRET_KEY
+            value_from: langfuse-secret-key
+          - name: LANGFUSE_PUBLIC_KEY
+            value_from: langfuse-public-key
+          - name: SECRET_KEY
+            value_from: app-secret-key
+          - name: AZURE_OPENAI_ENDPOINT
+            value_from: azure-openai-endpoint
+          - name: AZURE_OPENAI_API_KEY
+            value_from: azure-openai-api-key
+          # Non-secret config — safe as plain values.
+          - name: DATABASE_URL
+            value: "sqlite:////tmp/innodd.db"
+          - name: NOVELTY_DATABASE_URL
+            value: "sqlite:////tmp/noveltysearch.db"
+          - name: LANGFUSE_HOST
+            value: "https://us.cloud.langfuse.com"
+          - name: AZURE_OPENAI_DEPLOYMENT
+            value: "gpt-4o"
+          - name: AZURE_OPENAI_API_VERSION
+            value: "2024-05-01-preview"
+          - name: DATABRICKS_HOST
+            value: ${workspace.host}
+          - name: DRP_UC_CATALOG
+            value: "drug_repository"
+          - name: DRP_UC_WAREHOUSE_ID
+            value: ${var.uc_warehouse_id}
+          - name: DRP_UC_WRITES_ENABLED
+            value: "true"
+          # Gold schema inside DRP_UC_CATALOG. `drug_repository` is laid out as a
+          # medallion, so module output belongs in `gold` — the API sends this to
+          # every job it triggers so both sides stay on one schema.
+          - name: DRP_GOLD_SCHEMA
+            value: "gold"
+          # Where an agent job's work runs: "inprocess" calls app/modules/*
+          # directly; "databricks" triggers the module job below and reads Gold
+          # back. Deliberately in-process — the job notebooks are still
+          # placeholders, so flipping this now would serve PLACEHOLDER rows
+          # instead of real results. Flip once a module's science is ported.
+          - name: DRP_EXECUTION_BACKEND
+            value: "inprocess"
+          # Per-module opt-in, independent of the global switch above. ScreenSuite's
+          # job notebook runs the real docking pipeline (verified end to end on
+          # 2026-09-15: JAK2/6VGL vs ruxolitinib, -8.342 kcal/mol), so it — and only
+          # it — goes to its job. TxKG's notebook is still a placeholder, which is
+          # why the global switch must stay "inprocess".
+          - name: DRP_DATABRICKS_MODULES
+            value: "ScreenSuite"
+          # Per-module job ids, read by app/drp/execution.py and by
+          # modules/orchestration/router.py. These are the bundle's own jobs;
+          # they change whenever the bundle is redeployed to a new target.
+          - name: JOB_ID_TXKG
+            value: "325714213488150"
+          - name: JOB_ID_LITMINEX
+            value: "116100138016921"
+          - name: JOB_ID_CURATEX
+            value: "603719121829217"
+          - name: JOB_ID_SCREENSUITE
+            value: "377908132020938"
+          - name: JOB_ID_NOVELTY
+            value: "447505307735156"
+          # The Apps filesystem is read-only except /tmp; setup_logging() degrades
+          # to stream-only without this, losing the file log.
+          - name: LOG_DIR
+            value: "/tmp"
+          - name: DATABRICKS_LLM_ENDPOINT
+            value: "databricks-meta-llama-3-3-70b-instruct"
+          - name: NOVSEARCH_EMBEDDING_ENDPOINT
+            value: "databricks-qwen3-embedding-0-6b"
+          # The frontend's Cognito user pool. These identifiers are public (they
+          # appear in every browser request) and the pool's public JWKS is all the
+          # API needs to verify a token, so there is no secret to configure here.
+          - name: COGNITO_REGION
+            value: "us-east-1"
+          - name: COGNITO_USER_POOL_ID
+            value: "us-east-1_AYZb6Pkib"
+          - name: COGNITO_APP_CLIENT_ID
+            value: "4amqg86j1fpf6fcp7cuph1cg8q"
+          # Stopgap: the Lambda proxy forwards query params but drops headers, so
+          # the end user's Cognito token has nowhere else to travel. Set to
+          # "false" once the proxy forwards Authorization/X-Drp-Token — query
+          # strings reach access logs.
+          - name: DRP_ALLOW_QUERY_TOKEN
+            value: "true"
+          # TxKG's BioKG dataset, mounted read-only from the volume declared
+          # above. Without this the module fails every job with "BioKG data is
+          # not loaded", because the default path points inside the empty source tree.
+          - name: BIOKG_DATA_DIR
+            value: "/Volumes/drug_repository/bronze/biokg_raw"

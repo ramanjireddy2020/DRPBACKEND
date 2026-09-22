@@ -1,0 +1,96 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Knowledge Graph - Asthma</title>
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #ffffff; }
+        #header { text-align: center; margin-bottom: 20px; }
+        #container { display: flex; gap: 20px; }
+        #network { flex: 1; height: 700px; border: 1px solid #ddd; border-radius: 8px; background: #fafafa; }
+        #sidebar { width: 300px; overflow-y: auto; max-height: 700px; }
+        .controls { padding: 15px; background: #f5f5f5; border-radius: 8px; margin-bottom: 15px; }
+        button { padding: 8px 16px; margin: 5px; border: none; border-radius: 4px;
+                  background: #007B82;
+                  color: white; cursor: pointer; font-size: 14px; }
+        button:hover { background: white; color: #0A2E52; }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <h2 style="color:#0A2E52">Knowledge Graph: Asthma</h2>
+        <p style="color: #64748B;">Interactive Biological Context Network Visualization</p>
+    </div>
+    <div id="container">
+        <div id="network"></div>
+        <div id="sidebar">
+            <div class="controls">
+                <h3 style="margin: 0 0 10px 0;">Controls</h3>
+                <button onclick="network.fit()">Fit to Screen</button>
+                <button onclick="resetPhysics()">Reset Layout</button>
+                <button onclick="togglePhysics()">Toggle Physics</button>
+            </div>
+            
+    <div style="padding: 15px; background: #f5f5f5; border-radius: 8px; margin-bottom: 15px;">
+        <h3 style="margin: 0 0 10px 0;">Graph Statistics</h3>
+        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; font-size: 13px; white-space: nowrap;">
+            <div><strong>Nodes:</strong> 30</div>
+            <div><strong>Edges:</strong> 29</div>
+            <div><strong>Proteins:</strong> 27</div>
+            <div><strong>Predicted Targets:</strong> 25</div>
+            <div><strong>Disease:</strong> 1</div><div><strong>Proteins:</strong> 27</div><div><strong>Pathways:</strong> 2</div>
+        </div>
+    </div>
+    
+            
+    <div style="padding: 15px; background: #f5f5f5; border-radius: 8px;">
+        <h3 style="margin: 0 0 10px 0;">Legend</h3>
+        <div style="display: flex; align-items: center; margin: 5px 0;"><div style="width: 20px; height: 20px; background: #0A2E52; border-radius: 50%; margin-right: 8px;"></div><span>Disease: 1</span></div><div style="display: flex; align-items: center; margin: 5px 0;"><div style="width: 20px; height: 20px; background: #2D6A4F; border-radius: 50%; margin-right: 8px;"></div><span>Proteins: 27</span></div><div style="display: flex; align-items: center; margin: 5px 0;"><div style="width: 20px; height: 20px; background: #007B82; border-radius: 50%; margin-right: 8px;"></div><span>Pathways: 2</span></div>
+    </div>
+    
+            
+        <div style="padding: 15px; background: #E8F4FD; border-radius: 8px; margin-top: 15px;">
+            <h3 style="margin: 0 0 10px 0;">Top Predicted Targets</h3>
+            <ol style="margin: 0; padding-left: 20px; font-size: 13px;"><li><strong>C-C motif chemokine 2</strong> (Score: 0.8)</li>
+<li><strong>HLA class II histocompatibility antigen, DP beta 1 chain</strong> (Score: 0.8)</li>
+<li><strong>Interleukin-4</strong> (Score: 0.8)</li>
+<li><strong>Interleukin-13</strong> (Score: 0.8)</li>
+<li><strong>Forkhead box protein P3</strong> (Score: 0.8)</li>
+<li><strong>Interleukin-6 receptor subunit alpha</strong> (Score: 0.8)</li>
+<li><strong>C-X-C motif chemokine 14</strong> (Score: 0.8)</li>
+<li><strong>HLA class II histocompatibility antigen, DQ beta 1 chain</strong> (Score: 0.8)</li>
+<li><strong>High affinity immunoglobulin epsilon receptor subunit beta</strong> (Score: 0.8)</li>
+<li><strong>Interleukin-33</strong> (Score: 0.8)</li></ol>
+        </div>
+        
+        </div>
+    </div>
+    <script type="text/javascript">
+        const nodes = new vis.DataSet([{"id": "D001249", "label": "Asthma", "title": "Asthma\nType: disease\nScore: 100\nID: D001249", "color": "#0A2E52", "size": 60, "font": {"size": 12}}, {"id": "P13500", "label": "C-C motif chemokine 2", "title": "C-C motif chemokine 2\nType: gene/protein\nScore: 0.75\nID: P13500", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "P04440", "label": "HLA class II histocompatibilit...", "title": "HLA class II histocompatibility antigen, DP beta 1 chain\nType: gene/protein\nScore: 0.75\nID: P04440", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "P05112", "label": "Interleukin-4", "title": "Interleukin-4\nType: gene/protein\nScore: 0.75\nID: P05112", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "P35225", "label": "Interleukin-13", "title": "Interleukin-13\nType: gene/protein\nScore: 0.75\nID: P35225", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "Q9BZS1", "label": "Forkhead box protein P3", "title": "Forkhead box protein P3\nType: gene/protein\nScore: 0.75\nID: Q9BZS1", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "P08887", "label": "Interleukin-6 receptor subunit...", "title": "Interleukin-6 receptor subunit alpha\nType: gene/protein\nScore: 0.75\nID: P08887", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "O95715", "label": "C-X-C motif chemokine 14", "title": "C-X-C motif chemokine 14\nType: gene/protein\nScore: 0.75\nID: O95715", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "P01920", "label": "HLA class II histocompatibilit...", "title": "HLA class II histocompatibility antigen, DQ beta 1 chain\nType: gene/protein\nScore: 0.75\nID: P01920", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "Q01362", "label": "High affinity immunoglobulin e...", "title": "High affinity immunoglobulin epsilon receptor subunit beta\nType: gene/protein\nScore: 0.75\nID: Q01362", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "O95760", "label": "Interleukin-33", "title": "Interleukin-33\nType: gene/protein\nScore: 0.75\nID: O95760", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "P05231", "label": "Interleukin-6", "title": "Interleukin-6\nType: gene/protein\nScore: 0.75\nID: P05231", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "Q01638", "label": "Interleukin-1 receptor-like 1", "title": "Interleukin-1 receptor-like 1\nType: gene/protein\nScore: 0.75\nID: Q01638", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "P13501", "label": "C-C motif chemokine 5", "title": "C-C motif chemokine 5\nType: gene/protein\nScore: 0.75\nID: P13501", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "P24394", "label": "Interleukin-4 receptor subunit...", "title": "Interleukin-4 receptor subunit alpha\nType: gene/protein\nScore: 0.75\nID: P24394", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "P26358", "label": "DNA (cytosine-5)-methyltransfe...", "title": "DNA (cytosine-5)-methyltransferase 1\nType: gene/protein\nScore: 0.75\nID: P26358", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "Q92878", "label": "DNA repair protein RAD50", "title": "DNA repair protein RAD50\nType: gene/protein\nScore: 0.75\nID: Q92878", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "P01909", "label": "HLA class II histocompatibilit...", "title": "HLA class II histocompatibility antigen, DQ alpha 1 chain\nType: gene/protein\nScore: 0.75\nID: P01909", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "P09874", "label": "Poly [ADP-ribose] polymerase 1", "title": "Poly [ADP-ribose] polymerase 1\nType: gene/protein\nScore: 0.75\nID: P09874", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "P51671", "label": "Eotaxin", "title": "Eotaxin\nType: gene/protein\nScore: 0.75\nID: P51671", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "P01911", "label": "HLA class II histocompatibilit...", "title": "HLA class II histocompatibility antigen, DRB1 beta chain\nType: gene/protein\nScore: 0.75\nID: P01911", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "Q08499", "label": "cAMP-specific 3',5'-cyclic pho...", "title": "cAMP-specific 3',5'-cyclic phosphodiesterase 4D\nType: gene/protein\nScore: 0.75\nID: Q08499", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "P05113", "label": "Interleukin-5", "title": "Interleukin-5\nType: gene/protein\nScore: 0.75\nID: P05113", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "P14780", "label": "Matrix metalloproteinase-9", "title": "Matrix metalloproteinase-9\nType: gene/protein\nScore: 0.75\nID: P14780", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "Q9UKT9", "label": "Zinc finger protein Aiolos", "title": "Zinc finger protein Aiolos\nType: gene/protein\nScore: 0.75\nID: Q9UKT9", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "P22301", "label": "Interleukin-10", "title": "Interleukin-10\nType: gene/protein\nScore: 0.75\nID: P22301", "color": "#2D6A4F", "size": 35, "font": {"size": 12}}, {"id": "map05310", "label": "Asthma", "title": "Asthma\nType: pathway\nScore: 0.0\nID: map05310", "color": "#007B82", "size": 25, "font": {"size": 12}}, {"id": "hsa05310", "label": "hsa05310", "title": "hsa05310\nType: pathway\nScore: 0.0\nID: hsa05310", "color": "#007B82", "size": 25, "font": {"size": 12}}, {"id": "P05181", "label": "Cytochrome P450 2E1", "title": "Cytochrome P450 2E1\nType: gene/protein\nScore: 0.32\nID: P05181", "color": "#2D6A4F", "size": 20, "font": {"size": 12}}, {"id": "P35228", "label": "Nitric oxide synthase, inducib...", "title": "Nitric oxide synthase, inducible\nType: gene/protein\nScore: 0.32\nID: P35228", "color": "#2D6A4F", "size": 20, "font": {"size": 12}}]);
+        const edges = new vis.DataSet([{"from": "D001249", "to": "P13500", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P04440", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P05112", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P35225", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "Q9BZS1", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P08887", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "O95715", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P01920", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "Q01362", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "O95760", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P05231", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "Q01638", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P13501", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P24394", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P26358", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "Q92878", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P01909", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P09874", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P51671", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P01911", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "Q08499", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P05113", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P14780", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "Q9UKT9", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P22301", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "map05310", "title": "Disease Pathway Association", "label": "Disease Pathway Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "hsa05310", "title": "Disease Pathway Association", "label": "Disease Pathway Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P05181", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}, {"from": "D001249", "to": "P35228", "title": "Protein Disease Association", "label": "Protein Disease Associati", "arrows": "to", "color": {"color": "#636262", "opacity": 0.6}, "font": {"size": 10}}]);
+        const options = {
+            nodes: { shape: 'dot', font: { size: 12, color: '#000000' }, borderWidth: 2, borderWidthSelected: 3 },
+            edges: { width: 1, arrows: { to: { enabled: true, scaleFactor: 0.5 } },
+                      smooth: { type: 'continuous', roundness: 0.5 } },
+            physics: {
+                enabled: true,
+                forceAtlas2Based: { gravitationalConstant: -50, centralGravity: 0.01,
+                                     springLength: 200, springConstant: 0.08, damping: 0.4, avoidOverlap: 0.5 },
+                maxVelocity: 50, solver: 'forceAtlas2Based', timestep: 0.35,
+                stabilization: { enabled: true, iterations: 150, updateInterval: 25 }
+            },
+            interaction: { dragNodes: true, dragView: true, zoomView: true, hover: true, tooltipDelay: 200 }
+        };
+        const container = document.getElementById('network');
+        const network   = new vis.Network(container, { nodes, edges }, options);
+        let physicsEnabled = true;
+        function togglePhysics() { physicsEnabled = !physicsEnabled; network.setOptions({ physics: { enabled: physicsEnabled } }); }
+        function resetPhysics() { network.setOptions({ physics: { enabled: true } }); network.stabilize(); }
+        network.on('click', function(params) { if (params.nodes.length > 0) console.log('Selected:', nodes.get(params.nodes[0])); });
+        network.once('stabilizationIterationsDone', function() { network.fit({ animation: { duration: 1000, easingFunction: 'easeInOutQuad' } }); });
+    </script>
+</body>
+</html>
+    

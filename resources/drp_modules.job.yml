@@ -1,0 +1,114 @@
+# Per-module Databricks Jobs for the Drug Repurposing Platform.
+# One job per pipeline module (see architecture: Databricks Jobs API triggers
+# TxKG / LitMineX / CurateX / ScreenSuite / Novelty). Each runs its placeholder
+# notebook under src/DRP_Main/jobs/ on serverless compute and writes Gold Delta.
+#
+# NOTE: these are provisioned via the Jobs API (databricks jobs create) because
+# `bundle deploy` is blocked by endpoint security (terraform init denied). This
+# file is the IaC record; reconcile with `databricks bundle deploy` once EDR allows.
+resources:
+  jobs:
+    drp_txkg_job:
+      name: DRP - TxKG (Knowledge Graph)
+      parameters:
+        - name: catalog
+          default: drug_repository
+        - name: schema
+          default: gold
+        # Passed by the API on every run it triggers (app/drp/execution.py) and
+        # written onto each Gold row, so a completed run's output can be read
+        # back for that job. run_now rejects any parameter not declared here.
+        - name: drp_job_id
+          default: ""
+        - name: query
+          default: ""
+        - name: input
+          default: "Alzheimer disease"
+      tasks:
+        - task_key: txkg
+          notebook_task:
+            notebook_path: ../src/DRP_Main/jobs/txkg_job.py
+
+    drp_litminex_job:
+      name: DRP - LitMineX (Literature Mining)
+      parameters:
+        - name: catalog
+          default: drug_repository
+        - name: schema
+          default: gold
+        # Passed by the API on every run it triggers (app/drp/execution.py) and
+        # written onto each Gold row, so a completed run's output can be read
+        # back for that job. run_now rejects any parameter not declared here.
+        - name: drp_job_id
+          default: ""
+        - name: query
+          default: ""
+        - name: input
+          default: "Alzheimer disease"
+      tasks:
+        - task_key: litminex
+          notebook_task:
+            notebook_path: ../src/DRP_Main/jobs/litminex_job.py
+
+    drp_curatex_job:
+      name: DRP - CurateX (Drug Curation)
+      parameters:
+        - name: catalog
+          default: drug_repository
+        - name: schema
+          default: gold
+        # Passed by the API on every run it triggers (app/drp/execution.py) and
+        # written onto each Gold row, so a completed run's output can be read
+        # back for that job. run_now rejects any parameter not declared here.
+        - name: drp_job_id
+          default: ""
+        - name: query
+          default: ""
+        - name: input
+          default: ""
+      tasks:
+        - task_key: curatex
+          notebook_task:
+            notebook_path: ../src/DRP_Main/jobs/curatex_job.py
+
+    drp_screensuite_job:
+      name: DRP - ScreenSuite (Docking)
+      parameters:
+        - name: catalog
+          default: drug_repository
+        - name: schema
+          default: gold
+        # Passed by the API on every run it triggers (app/drp/execution.py) and
+        # written onto each Gold row, so a completed run's output can be read
+        # back for that job. run_now rejects any parameter not declared here.
+        - name: drp_job_id
+          default: ""
+        - name: query
+          default: ""
+        - name: input
+          default: ""
+      tasks:
+        - task_key: screensuite
+          notebook_task:
+            notebook_path: ../src/DRP_Main/jobs/screensuite_job.py
+
+    drp_novelty_job:
+      name: DRP - Novelty (Patent Search)
+      parameters:
+        - name: catalog
+          default: drug_repository
+        - name: schema
+          default: gold
+        # Passed by the API on every run it triggers (app/drp/execution.py) and
+        # written onto each Gold row, so a completed run's output can be read
+        # back for that job. run_now rejects any parameter not declared here.
+        - name: drp_job_id
+          default: ""
+        - name: query
+          default: ""
+        - name: input
+          default: ""
+      tasks:
+        - task_key: novelty
+          notebook_task:
+            notebook_path: ../src/DRP_Main/jobs/novelty_job.py
