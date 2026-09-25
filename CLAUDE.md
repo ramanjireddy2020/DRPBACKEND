@@ -7,9 +7,105 @@ pharmaceutical research platform. It exposes a 5-module drug discovery pipeline 
 running on port 8080 with a uvicorn server (locally, inside a Conda `pymol_env` environment).
 
 **Tech stack:** Python 3.12, FastAPI, SQLAlchemy, Pydantic v2, pydantic-settings, Langfuse 2.x,
-Groq, Google Gemini 2.5 Flash, SerpAPI, AutoDock Vina + Open Babel (external executables),
-RDKit, PDBFixer/OpenMM, ProLIF, BioPython, NetworkX. Deployable to Databricks via the bundle
-(`databricks.yml`).
+Databricks Foundation Model APIs, Groq, Google Gemini 2.5 Flash, Europe PMC (SureChEMBL patent
+corpus), AutoDock Vina + Open Babel (external executables), RDKit, PDBFixer/OpenMM, ProLIF,
+BioPython, NetworkX. Deployable to Databricks via the bundle (`databricks.yml`).
+
+---
+
+## How the system fits together
+
+Read this first if you are new to the codebase. Everything below it is reference.
+
+### The shape of the thing
+
+A researcher asks a question in plain language — *"find protein targets for thrombocytosis"* —
+and five scientific modules answer it in sequence, each one's output feeding the next:
+
+```
+TxKG          which proteins does the knowledge graph connect to this disease?
+  ↓ targets
+LitMineX      what does the published literature say about those proteins?
+  ↓ articles
+CurateX       which existing approved drugs could be repurposed against that target?
+  ↓ compounds
+ScreenSuite   do those compounds actually dock into the protein structure?
+  ↓ hits
+NovSearch     is any of this already patented?
+```
+
+Each module is a real scientific pipeline, not a wrapper round an LLM. TxKG runs a
+degree-corrected random walk over a 207k-node / 2.9M-edge biomedical graph. CurateX pulls
+ligands from six chemistry databases and scores candidates on 20 weighted criteria.
+ScreenSuite runs AutoDock Vina. LLMs are used for *explanation and extraction* — never to
+invent a result — which is why grounding rules appear all over this document.
+
+### Three layers, and why
+
+```
+     AWS API Gateway  →  Lambda proxy  →  Databricks App (FastAPI)
+      (Cognito JWT)      (integrations/     (this repository)
+                          aws_proxy)
+```
+
+1. **`/v1` (`app/drp/`) — the frontend contract.** camelCase wire models matching the DRP
+   OpenAPI spec exactly. Nothing scientific happens here. A request creates a job and returns
+   `202 {jobId}`; the client polls. This exists so the UI has one stable shape to code
+   against while the science underneath changes freely.
+2. **`/api/v1` (`app/modules/`) — the pipeline.** Five self-contained modules, each with its
+   own router, services and schemas. snake_case, scientific vocabulary, no HTTP concerns.
+3. **`app/drp/runners.py` — the seam.** Adapters that call a module and reshape its output
+   into the `/v1` contract. Every import inside a runner is lazy, so a missing scientific
+   dependency fails one job with a readable message instead of breaking API startup.
+
+The two-layer split is the single most important thing to understand. When a wire field and
+a module field disagree, the runner is where they are reconciled — not by renaming either
+side.
+
+### Why the job queue exists
+
+Scientific work takes 30 seconds to 5 minutes. TxKG propagation alone is ~45s; a CurateX
+profile is ~85s. HTTP requests cannot wait that long, so every module call is a `DrpJob`:
+`202 {jobId}` → poll `/agents/jobs/{id}/status` → read `/agents/jobs/{id}/result`. The
+`progressMessage` on the status response is what the UI shows while waiting, which makes it
+user-facing text, not a debug log.
+
+### How a plain-language question becomes a module run
+
+`app/drp/dispatch.py` decides. In priority order: an explicit `@module` mention, then an
+unambiguous instruction to run one (`explicit_module_request` — an action verb *plus* that
+module's object, so "what about the patents on these?" stays a question and doesn't launch
+NovSearch), then keyword intent, defaulting to TxKG. Inside a session, a follow-up message
+is answered from the step's *existing results* rather than re-running anything — the
+researcher is asking about what is on screen.
+
+### Two things that will bite you
+
+**LLM calls are all-or-nothing on config.** `core/llm.py` only calls Databricks Model
+Serving `if settings.DATABRICKS_HOST and settings.DATABRICKS_TOKEN`. With either unset, the
+TxKG interpretation, session chat and article chat silently fall back to extractive text —
+the API returns 200 and the feature looks broken rather than erroring. `DATABRICKS_TOKEN` is
+*not* the same credential as the Lambda's `DATABRICKS_CLIENT_ID`/`SECRET`; see
+`integrations/aws_proxy/README.md`.
+
+**The response contract is load-bearing.** A frontend team codes against these shapes.
+Changes must be **additive** — add a field, never rename or remove one. `score` was added
+alongside `compositeScore` for exactly this reason. Verify with a captured payload before and
+after, comparing key sets.
+
+### Known rough edges
+
+- **CurateX ranking is distorted by missing data.** The composite divides by the weight that
+  *had* data, so a sparsely-characterised drug scoring only on "approved, not withdrawn" can
+  out-rank a well-characterised one. `dataCompleteness` is returned per candidate but does
+  not affect ranking.
+- **CurateX stage 2 rebuilds the profile** rather than reusing the edited one, re-running the
+  six-database retrieval (~85s). `SessionState`/`PROFILE_READY` exists but is not wired to it.
+- **Baselines use raw min/max**, which outliers distort (adverse-event LLR spans 8.7–6807, so
+  that criterion contributes almost nothing). Percentiles would be better.
+- **`app/supervisor/` (LangGraph) is not on the `/v1` path.** `langgraph` is in
+  `pyproject.toml` but not in `app-requirements.txt`, which is what the Databricks app
+  installs. Treat it as superseded by `app/drp/` unless someone confirms otherwise.
 
 ---
 
@@ -60,7 +156,7 @@ src/DRP_Main/app/
 │   ├── literature/        # Module 2 — PubMed search + MeSH + LLM relevance scoring
 │   ├── drug_curation/     # Module 3 — CurateX spec chain (+ legacy Groq generator)
 │   ├── screening/         # Module 4 — AutoDock Vina molecular docking pipeline
-│   └── novelty/           # Module 5 — Patent novelty search (Gemini + SerpAPI)
+│   └── novelty/           # Module 5 - Patent novelty search (Gemini + Europe PMC)
 ├── api/v1/
 │   ├── router.py          # Central router aggregating all modules
 │   └── endpoints/
@@ -199,7 +295,7 @@ for data loading (`df_links`, `id_to_type`, `ctx_adj`, `edge_lookup`, `PROTEIN_N
 | §5 sourcing gate | `_apply_sourcing_gate()` | resolves each path edge through `EDGE_PROVENANCE`; unsourced Hidden candidates are dropped or flagged `unconfirmed`, never presented as confirmed. |
 | §6 path reconstruction | `reconstruct_paths()` | bounded BFS, run **only** for candidates that already survived scoring. Traverses `ctx_adj` **plus** the annotation layers, so processes appear as intermediates. |
 | §6/§9 visualization | `render_candidate_subgraph_html()` | openable page under `/api/v1/graphs/discovery/{file}`; candidates coloured by §4 category, outlined grey when §5-unconfirmed, every edge's provenance in its tooltip. |
-| §7–§8 novelty + interpretation | `novelty_label()`, `interpret_candidates()` | all NCBI eutils traffic goes through the shared per-event-loop throttle (`_eutils_gate`) — firing these concurrently otherwise returns 429s that silently degrade every novelty label to `Unknown`. Patents come from module 5's novelty agent when importable (latched off after one failure), else direct SerpAPI. Set `NCBI_API_KEY` / `SERPAPI_API_KEY`. |
+| §7–§8 novelty + interpretation | `novelty_label()`, `interpret_candidates()` | all NCBI eutils traffic goes through the shared per-event-loop throttle (`_eutils_gate`) — firing these concurrently otherwise returns 429s that silently degrade every novelty label to `Unknown`. Patents come from module 5's novelty agent when importable (latched off after one failure), else Europe PMC's patent corpus directly. Set `NCBI_API_KEY`; no patent-search key is needed. |
 | §9 output assembly | `build_ranked_table()` | one ranked table, every row labelled; Known/Hidden groups still available separately. |
 | §10 recommendation | `build_recommendation()` | names the specific candidate and the factors that drove it. Rule order follows the spec: under-explored confirmed Hidden first, then both-groups-strong, then fall back to Known. |
 | §11 supervising layer | `handle_message()`, `SESSION_STATE` | routes a message to the full chain, a scoped follow-up, or a recap; `mode` in the response says which. A follow-up reads already-computed scores/paths — only a fresh disease restarts at §1. |
@@ -279,7 +375,7 @@ precedence, the SPL parsing and the exclusion filter offline (no network, no LLM
 
 ### NovSearch — the functional spec's three tools
 `modules/novelty/` carries two surfaces. `api/v1/endpoints/novelty_search_agent.py` is the
-legacy agent (`/agent/*`): SerpAPI → Google Patents, HTML scraping, HuggingFace embeddings,
+legacy agent (`/agent/*`): Europe PMC patent search, HTML scraping, HuggingFace embeddings,
 Qdrant Cloud, one Gemini call, plus its own usage-tracking and history endpoints. It is kept
 because it is a different contract. `novsearch_service.py` implements the NovSearch functional
 specification on the platform's AWS/Databricks stack and is what the agent and
@@ -288,8 +384,8 @@ specification on the platform's AWS/Databricks stack and is what the agent and
 | Spec | Where | Note |
 |---|---|---|
 | §2 input shapes | `novsearch_service.normalize_input()` | Case A (`screensuite_carryover`) builds the query string from the resolved target/drug/disease and carries `candidate_id`/`docking_id` through. Case B (`user_direct`) uses the text as typed and runs the shared NER tagger only to isolate terms for title detection. Both converge on one normalized shape; the ids are **absent, not null-filled**, for a fresh query — and that absence is preserved all the way out (`response_model_exclude_none` on `/v1`). |
-| §3 Tool 1 | `retrieval_service.py` | Title detection → Google Patents search (via SerpAPI) → BM25Okapi over title+abstract → RRF (k=60) of the API order and the BM25 order → title-pin similarity → MiniLM cross-encoder on Model Serving, min-maxed to 1-10. A cold or failing cross-encoder degrades to the RRF order rather than failing the assessment. `QueryCache` serves a repeat query from cache and fetches only the difference when more results are asked for. |
-| §3 step 2 | `google_patents_service.py` | The spec names USPTO PatentsView (retired 2026-03-20); its USPTO Open Data Portal replacement was dropped too — ODP requires an ID.me-verified MyUSPTO account to issue a key, and one was never obtained, so NovSearch could never actually reach it. Retrieval now goes through **SerpAPI's `google_patents` engine** (same `SERPAPI_API_KEY` used elsewhere on the platform) for search — SerpAPI returns bibliographic fields (title, snippet, assignee, dates) directly in its own relevance order (`api_rank`). SerpAPI does **not** include claims text in search results, and a per-patent detail call for every indexed patent isn't worth metering, so full content (claims, background/summary/description) is scraped from `patents.google.com/patent/<id>/en` (public, unauthenticated) via `bs4`, with a regex fallback when the page's markup doesn't match the expected `itemprop`/class structure. `normalize_patent_id` / `display_patent_id` are near-identical here — Google's own ID form (`US10123456B2`) already **is** the display form, unlike ODP's bare-number storage key. HTML parsing is pinned offline against a fixture in `tests/test_novsearch.py`. |
+| §3 Tool 1 | `retrieval_service.py` | Title detection → patent search (Europe PMC) → BM25Okapi over title+abstract → RRF (k=60) of the API order and the BM25 order → title-pin similarity → MiniLM cross-encoder on Model Serving, min-maxed to 1-10. A cold or failing cross-encoder degrades to the RRF order rather than failing the assessment. `QueryCache` serves a repeat query from cache and fetches only the difference when more results are asked for. |
+| §3 step 2 | `google_patents_service.py` | The spec names USPTO PatentsView (retired 2026-03-20); its USPTO Open Data Portal replacement was dropped too — ODP requires an ID.me-verified MyUSPTO account to issue a key, and one was never obtained. Retrieval then ran on SerpAPI's `google_patents` engine until that metered out: $0.015/search against a 100/month free tier, after which it returned `429 "Your account has run out of searches"` and **every** NovSearch run failed outright — it also silently blanked TxKG's novelty labels, which use the same lookup. Retrieval now goes through **Europe PMC's patent corpus** (`SRC:"PAT"`, the SureChEMBL patent set) — free, unmetered, no key, same EMBL-EBI family as ChEMBL. Note the query semantics differ from Google's: a bare space in Europe PMC is a **phrase** match, not an AND, so terms are ANDed explicitly and then relaxed a rung at a time (`europepmc_queries`) until one returns hits — ANDing everything is brittle, since one ordinary word like "combination" takes a real result set to zero. Bibliographic fields (title, abstract, applicants, dates) come back in relevance order (`api_rank`); full content (claims, background/summary/description) is still scraped from `patents.google.com/patent/<id>/en` (public, unauthenticated) via `bs4`, with a regex fallback. Coverage caveat: Europe PMC indexes title+abstract, where Google searched full text, so INN drug names that only appear in a patent's body may be missed. The SerpAPI path survives as dead code behind `SERPAPI_API_KEY` if that tradeoff ever needs reversing. HTML parsing is pinned offline against a fixture in `tests/test_novsearch.py`. |
 | §4 Tool 2 | `indexing_service.py` | Dedup against the store **before** any fetch or embed → structured fetch → section-weighted chunking (independent claims 1.00 … background 0.70), claim chunks tagged by number → BGE-large-en-v1.5 (1024-dim, L2-normalised, `query: `/`passage: ` prefixes) on Model Serving → upsert into Databricks Vector Search → oldest-patent eviction past `NOVSEARCH_MAX_PATENTS`. A direct-access index, not delta-sync: indexing is driven by an API request, not a table write, so we supply the vectors. Row keys are a hash of `chunk_id`, so re-indexing overwrites rather than duplicating. |
 | §5 Tool 3 | `synthesis_service.py` | One LLM call per report or QA turn. Retrieval is section-weighted, so an independent claim outranks an equally similar background paragraph. The report prompt requires the answer to address the §2 query specifically — not to summarise the patents — with every claim tied to a patent ID; it is split on `RECOMMENDED NEXT STEPS` into `agent_answer` / `recommendations`. QA modes follow `patent_ids`: one → `single_patent` (metadata questions answered from metadata chunks, claims questions prioritising claim-tagged chunks), several → `multiple_patent`, none → `multi_patent` over everything indexed. |
 | §5 model | `databricks_clients.py` | SaulLM (or whatever's configured — Llama 3.3 70B on the deployed workspace) on Model Serving, falling back to Groq (`core/llm.py`, already used elsewhere on the platform) on any failure or rate limit. `model_used` reports which one **actually** answered, not which was configured. `databricks.vector_search` is a lazy import. |
@@ -455,8 +551,8 @@ decorator API was removed.
 | `GROQ_MODEL` | Default: `llama-3.3-70b-versatile` |
 | `GOOGLE_API_KEY` | Novelty search (Gemini) |
 | `GEMINI_MODEL` | Default: `gemini-2.5-flash` |
-| `SERPAPI_API_KEY` | Legacy novelty search, TxKG patent lookups, NovSearch patent retrieval (`google_patents_service.py`, SerpAPI's `google_patents` engine — replaced USPTO ODP, which needed an ID.me-verified MyUSPTO account never obtained) |
-| `DATABRICKS_HOST` / `DATABRICKS_TOKEN` | NovSearch Model Serving (BGE-large, MiniLM, SaulLM) and Vector Search |
+| `SERPAPI_API_KEY` | **No longer required.** Patent retrieval (NovSearch, TxKG novelty labels, the legacy agent) moved to Europe PMC, which needs no key. Setting it re-enables the dead SerpAPI path in `novelty_search_agent._serp_search` only. |
+| `DATABRICKS_HOST` / `DATABRICKS_TOKEN` | NovSearch Model Serving (BGE-large, MiniLM, SaulLM) and Vector Search — **and every LLM call made through `core/llm.py`**: the TxKG interpretation, session follow-up answers and article chat all go through `llm_client.databricks()`, which is skipped entirely unless *both* are set. With `DATABRICKS_TOKEN` unset those features fall back to extractive text and look broken rather than failing loudly. |
 | `NOVSEARCH_EMBEDDING_ENDPOINT` / `NOVSEARCH_CROSS_ENCODER_ENDPOINT` / `NOVSEARCH_LLM_ENDPOINT` | Model Serving endpoint names |
 | `NOVSEARCH_VS_ENDPOINT` / `NOVSEARCH_VS_INDEX` | Databricks Vector Search endpoint and direct-access index |
 | `NOVSEARCH_MAX_PATENTS` | Patent cap in the vector store; oldest evicted past it (default 20) |
@@ -557,7 +653,7 @@ Static input files (not generated) live in `src/DRP_Main/app/sample_ip_files/`:
 | Edit NovSearch Tool 1 (search, BM25, RRF, rerank, cache) | `src/DRP_Main/app/modules/novelty/retrieval_service.py` |
 | Edit NovSearch Tool 2 (dedup, chunking, embed, vector store) | `src/DRP_Main/app/modules/novelty/indexing_service.py` |
 | Edit NovSearch Tool 3 (report synthesis + QA modes) | `src/DRP_Main/app/modules/novelty/synthesis_service.py` |
-| Edit the Google Patents client (SerpAPI search + scraped full-text/claims parsing) | `src/DRP_Main/app/modules/novelty/google_patents_service.py` |
+| Edit the patent client (Europe PMC search + scraped full-text/claims parsing) | `src/DRP_Main/app/modules/novelty/google_patents_service.py` |
 | Edit Model Serving clients (embeddings, cross-encoder, SaulLM/Groq fallback) | `src/DRP_Main/app/modules/novelty/databricks_clients.py` |
 | Edit legacy novelty search logic (Google Patents / Gemini) | `src/DRP_Main/app/api/v1/endpoints/novelty_search_agent.py` |
 | Change data directory paths | `src/DRP_Main/app/modules/screening/enums.py` |
