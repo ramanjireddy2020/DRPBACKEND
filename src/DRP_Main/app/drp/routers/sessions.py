@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session as OrmSession
 from DRP_Main.app.core.logging import get_logger
 from DRP_Main.app.db.session import get_db
 from DRP_Main.app.drp import schemas as s
-from DRP_Main.app.drp.catalog import AGENT_DISPLAY_NAMES, canonical_module
+from DRP_Main.app.drp.catalog import AGENT_DISPLAY_NAMES, MODULES, canonical_module
 from DRP_Main.app.drp.deps import current_user
 from DRP_Main.app.drp.dispatch import JOB_KIND_BY_MODULE, infer_module, start_module_job
 from DRP_Main.app.drp.models import (
@@ -483,10 +483,14 @@ def post_message(
     _add_message(db, session.id, "user", body.message, step_id=step.id if step else None)
     db.commit()
 
-    # An explicit @mention is the one signal strong enough to change agent.
-    from DRP_Main.app.drp.dispatch import extract_module_mention
+    # An @mention moves the conversation to another agent; so does an unambiguous
+    # instruction to run one ("create a drug profile for JAK2"), which previously
+    # got answered out of the current module's results instead of starting CurateX.
+    # `explicit_module_request` requires an action verb and that module's object,
+    # so a question about the results on screen still stays with this agent.
+    from DRP_Main.app.drp.dispatch import explicit_module_request, extract_module_mention
 
-    mentioned = extract_module_mention(body.message)
+    mentioned = extract_module_mention(body.message) or explicit_module_request(body.message)
     if mentioned and (step is None or mentioned != step.module):
         new_step = _create_step(
             db,
@@ -533,6 +537,28 @@ def post_message(
     )
 
 
+def _module_menu() -> str:
+    """
+    The real module catalogue, for the follow-up prompt.
+
+    Without it the model was told to "suggest which module would" answer the
+    question while never being shown which modules exist, so it invented
+    plausible ones — "Dictionary", "TargetFinder", "GeneWiki" — and researchers
+    went looking for features that were never built. The list is derived from
+    `MODULES` rather than written out here so a new module cannot go missing.
+    """
+    lines = "\n".join(f"  - {m.key}: {m.description}" for m in MODULES)
+    return (
+        "These are the ONLY modules that exist on this platform:\n"
+        f"{lines}\n\n"
+        "Never name a module outside this list — not even a plausible-sounding one, "
+        "and never a database or website as though it were a module. If one of these "
+        "would answer the question, name it exactly as written above and say the "
+        "researcher can start it by typing @<module> with their request. If none of "
+        "them would, say so plainly and stop; do not invent a destination."
+    )
+
+
 def _answer_follow_up(db: OrmSession, step: Optional[DrpSessionStep], question: str) -> str:
     """
     Answer a follow-up from the step's own results rather than re-running it.
@@ -574,8 +600,18 @@ def _answer_follow_up(db: OrmSession, step: Optional[DrpSessionStep], question: 
                     "role": "system",
                     "content": (
                         f"You are the DRP {step.module} agent. Answer the researcher's "
-                        "question using only the results provided. If the results do not "
-                        "contain the answer, say so plainly and suggest which module would."
+                        "question from the results provided wherever they cover it, and "
+                        "say which result you are drawing on.\n\n"
+                        "If the results do not cover it but the question is general "
+                        "biomedical background — what a gene, protein, pathway or "
+                        "disease is — answer it from your own knowledge in a sentence "
+                        "or two, and begin that part with 'From general knowledge, not "
+                        "these results:'. Refusing to say what a gene is, when the "
+                        "researcher is looking at that gene, is not useful. Never invent "
+                        "specific numbers, scores or citations this way — those must come "
+                        "from the results or not at all. If the question asks for "
+                        "something only another run could produce, say so plainly.\n\n"
+                        + _module_menu()
                     ),
                 },
                 {

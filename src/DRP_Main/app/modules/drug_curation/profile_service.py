@@ -36,6 +36,7 @@ from DRP_Main.app.modules.drug_curation.identifier_service import (
 )
 from DRP_Main.app.modules.drug_curation.scoring_service import (
     CriterionBaseline,
+    apply_value_overrides,
     build_baselines,
 )
 
@@ -462,6 +463,7 @@ def build_profile(
     disease_name: Optional[str] = None,
     weights: Optional[Dict[str, float]] = None,
     skip_dailymed: bool = False,
+    values: Optional[Dict[str, Any]] = None,
 ) -> DrugProfile:
     """
     Run Tool 1 end to end for a single target.
@@ -509,17 +511,27 @@ def build_profile(
     enrich_open_targets_drug_fields(ligands)
     backfill_chembl_warnings(ligands)
 
+    # Warnings surface next to the profile in the UI, so they name the criteria
+    # rather than their numbers: "criteria 15-19" is internal numbering that means
+    # nothing to a researcher reading it under the results.
+    _LABEL_CRITERIA = "dosage form, dosing frequency, absorption, half-life and metabolism"
+
     if skip_dailymed:
-        warnings.append("DailyMed enrichment skipped — criteria 15-19 carry no data.")
+        warnings.append(
+            f"FDA label data was not retrieved, so {_LABEL_CRITERIA} carry no data."
+        )
     else:
         stats = enrich_with_dailymed(ligands)
         if stats["no_label"]:
             warnings.append(
-                f"{stats['no_label']} of {stats['attempted']} ligand(s) had no DailyMed label; "
-                "criteria 15-19 are scored on partial coverage."
+                f"{stats['no_label']} of {stats['attempted']} ligand(s) had no FDA label on "
+                f"DailyMed, so {_LABEL_CRITERIA} are scored on the remainder only."
             )
 
     baselines = build_baselines([ligand.fields for ligand in ligands])
+    # The researcher's edited criterion values override what the ligand set
+    # taught us; without this the edits were collected and discarded.
+    warnings.extend(apply_value_overrides(baselines, values))
     exclusion = build_exclusion(resolved_disease)
 
     active_weights = default_profile_weights()
@@ -546,17 +558,18 @@ def build_profiles(
     disease_name: Optional[str] = None,
     weights: Optional[Dict[str, float]] = None,
     skip_dailymed: bool = False,
+    values: Optional[Dict[str, Any]] = None,
 ) -> List[DrugProfile]:
     """§5 step 1 — several targets means one profile object per target, in parallel."""
     names = [n for n in (t.strip() for t in target_names) if n]
     if not names:
         raise ResolutionError("At least one target is required")
     if len(names) == 1:
-        return [build_profile(names[0], disease_name, weights, skip_dailymed)]
+        return [build_profile(names[0], disease_name, weights, skip_dailymed, values)]
 
     with ThreadPoolExecutor(max_workers=min(4, len(names))) as executor:
         futures = [
-            executor.submit(build_profile, name, disease_name, weights, skip_dailymed)
+            executor.submit(build_profile, name, disease_name, weights, skip_dailymed, values)
             for name in names
         ]
         profiles: List[DrugProfile] = []

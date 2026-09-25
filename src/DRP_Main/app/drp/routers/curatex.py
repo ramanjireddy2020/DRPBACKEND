@@ -38,6 +38,7 @@ def target_profile(
             "target": body.target,
             "disease": body.disease,
             "weights": body.weights,
+            "values": body.values,
             "numResults": 20,
         },
         session_id=body.sourceSessionId,
@@ -70,6 +71,7 @@ def curate_compounds(
             "compound": body.compound,
             "disease": body.disease,
             "weights": body.weights,
+            "values": body.values,
             "numResults": body.numResults,
         },
     )

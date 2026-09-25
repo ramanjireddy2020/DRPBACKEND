@@ -98,6 +98,46 @@ def resolve_target(query: str, subject: str) -> str:
     return extract_gene_symbol(query) or subject
 
 
+#: An instruction to run a module, as opposed to a question about the results on
+#: screen. Only an explicit `@mention` used to move a conversation between agents,
+#: so "create a drug profile for JAK2" was answered out of whatever the current
+#: module had already returned — the agent would even describe the other module
+#: while refusing to start it. Keyword matching alone cannot replace the mention:
+#: "what about the patents on these?" is a question about the current results, not
+#: a request to run NovSearch. So a match needs an action verb *and* that module's
+#: object, which a question phrased as a question will not satisfy.
+_ACTION = r"(?:create|build|generate|make|produce|run|start|perform|do)"
+
+_MODULE_INTENTS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(rf"\b{_ACTION}\b[^.?!]*\b(?:drug|target|compound|candidate)\s+profile\b", re.I),
+     "CurateX"),
+    (re.compile(rf"\b{_ACTION}\b[^.?!]*\bcurat(?:e|ion)\b", re.I), "CurateX"),
+    (re.compile(rf"\b{_ACTION}\b[^.?!]*\b(?:novelty|freedom[- ]to[- ]operate|fto|prior art)\b", re.I),
+     "NovSearch"),
+    (re.compile(rf"\b{_ACTION}\b[^.?!]*\b(?:dock(?:ing)?|screen(?:ing)?)\b", re.I), "ScreenSuite"),
+    (re.compile(rf"\b{_ACTION}\b[^.?!]*\b(?:literature|pubmed)\s*(?:search|mining|review)?\b", re.I),
+     "LitMineX"),
+    (re.compile(rf"\b{_ACTION}\b[^.?!]*\b(?:knowledge graph|subgraph)\b", re.I), "TxKG"),
+]
+
+
+def explicit_module_request(message: str) -> Optional[str]:
+    """
+    The module a message explicitly asks to *run*, or None.
+
+    Deliberately conservative: it answers None for anything that reads as a
+    question about the current results, because moving the conversation to
+    another agent mid-read is worse than answering in place.
+    """
+    text = (message or "").strip()
+    if not text:
+        return None
+    for pattern, module in _MODULE_INTENTS:
+        if pattern.search(text):
+            return module
+    return None
+
+
 def split_target_disease(query: str) -> Tuple[str, str]:
     """Split 'HER2 in Breast Cancer' / 'HER2 for Breast Cancer' into its parts."""
     cleaned = _strip_query_noise(query)

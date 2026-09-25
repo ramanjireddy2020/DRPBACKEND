@@ -91,6 +91,7 @@ class CurateXService:
         targets: Optional[Sequence[str]] = None,
         candidate_targets: Optional[Sequence[Dict[str, Any]]] = None,
         weights: Optional[Dict[str, float]] = None,
+        values: Optional[Dict[str, Any]] = None,
         skip_dailymed: bool = False,
         session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -106,6 +107,7 @@ class CurateXService:
             targets=targets,
             candidate_targets=candidate_targets,
             weights=weights,
+            values=values,
             skip_dailymed=skip_dailymed,
             session_id=session_id,
         )
@@ -118,6 +120,7 @@ class CurateXService:
         targets: Optional[Sequence[str]] = None,
         candidate_targets: Optional[Sequence[Dict[str, Any]]] = None,
         weights: Optional[Dict[str, float]] = None,
+        values: Optional[Dict[str, Any]] = None,
         skip_dailymed: bool = False,
         session_id: Optional[str] = None,
     ) -> tuple[Dict[str, Any], List[DrugProfile]]:
@@ -139,7 +142,7 @@ class CurateXService:
 
         try:
             profiles = profile_service.build_profiles(
-                target_names, disease, weights, skip_dailymed
+                target_names, disease, weights, skip_dailymed, values
             )
         except ResolutionError as exc:
             raise CurateXError(str(exc)) from exc
@@ -224,6 +227,7 @@ class CurateXService:
         self,
         profile: DrugProfile,
         weights: Optional[Dict[str, float]] = None,
+        values: Optional[Dict[str, Any]] = None,
         top_n: int = 25,
         universe_limit: Optional[int] = None,
         min_phase: Optional[int] = None,
@@ -245,6 +249,7 @@ class CurateXService:
             top_n=top_n,
             min_phase=min_phase,
             weights=weights,
+            values=values,
         )
 
         target_name = profile.target.gene_symbol if profile.target else None
@@ -271,6 +276,7 @@ class CurateXService:
         targets: Optional[Sequence[str]] = None,
         candidate_targets: Optional[Sequence[Dict[str, Any]]] = None,
         weights: Optional[Dict[str, float]] = None,
+        values: Optional[Dict[str, Any]] = None,
         top_n: int = 25,
         universe_limit: Optional[int] = None,
         min_phase: Optional[int] = None,
@@ -290,6 +296,7 @@ class CurateXService:
             targets=targets,
             candidate_targets=candidate_targets,
             weights=weights,
+            values=values,
             skip_dailymed=skip_dailymed,
             session_id=session_id,
         )
@@ -304,6 +311,7 @@ class CurateXService:
             self.score_candidates(
                 profile,
                 weights=weights,
+                values=values,
                 top_n=top_n,
                 universe_limit=universe_limit,
                 min_phase=min_phase,

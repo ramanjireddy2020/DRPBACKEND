@@ -185,17 +185,21 @@ class UsageTracker:
                     call_type, input_tokens, output_tokens, total_cost, retries)
         return rec
 
-    def record_serp(self, query, call_type, results_returned):
+    def record_serp(self, query, call_type, results_returned,
+                    cost=SERPAPI_COST_PER_SEARCH, provider="serpapi"):
+        # `cost` is a parameter because Europe PMC is free: billing a metered rate
+        # for an unmetered call would make the cost summary fiction. The record
+        # shape is unchanged so the usage endpoint keeps its contract.
         rec = SerpAPICallRecord(
             timestamp=datetime.utcnow().isoformat(), query=query[:200],
             call_type=call_type, results_returned=results_returned,
-            cost=SERPAPI_COST_PER_SEARCH,
+            cost=cost,
         )
         self.serp_calls.append(rec)
         self.serp_total_calls += 1
-        self.serp_total_cost  += SERPAPI_COST_PER_SEARCH
-        logger.info("SerpAPI [%s] results=%d cost=$%.4f  cumulative_calls=%d",
-                    call_type, results_returned, SERPAPI_COST_PER_SEARCH,
+        self.serp_total_cost  += cost
+        logger.info("patent-search [%s/%s] results=%d cost=$%.4f  cumulative_calls=%d",
+                    provider, call_type, results_returned, cost,
                     self.serp_total_calls)
         return rec
 
@@ -1339,8 +1343,135 @@ startup_wipe()
 #  §14  GOOGLE PATENTS SEARCH  (unchanged)
 # ══════════════════════════════════════════════════════════════════════════════
 
+#: Europe PMC's patent corpus is the SureChEMBL patent set — the same EMBL-EBI
+#: chemistry-patent index, reachable over a documented REST endpoint with no key
+#: and no per-search charge. SerpAPI billed $0.015 a search against a 100/month
+#: free tier and simply stopped answering once that ran out ("Your account has run
+#: out of searches"), which took NovSearch down with it.
+EUROPEPMC_SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+
+#: Europe PMC's page size cap for a single search request.
+_EPMC_MAX_PAGE_SIZE = 1000
+
+
+#: Words that carry no discriminating power in a patent query. Europe PMC ANDs
+#: every term, so one generic word ("combination", "inhibitor") can take a real
+#: result set to zero: `jak2 AND imatinib` finds 2 patents, and adding
+#: `AND combination` finds none. These are dropped before the narrowest attempt.
+_EPMC_GENERIC_TERMS = frozenset({
+    "a", "an", "and", "the", "of", "for", "in", "on", "with", "to", "or", "by",
+    "analysis", "assessment", "combination", "combinations", "compound",
+    "compounds", "drug", "drugs", "novel", "novelty", "perform", "prior", "art",
+    "study", "therapy", "treatment", "use", "uses", "using", "via",
+})
+
+
+def _epmc_queries(query: str, is_title: bool = False) -> List[str]:
+    """
+    Progressively broader Europe PMC queries for one caller query, narrowest first.
+
+    Europe PMC has no Google-style operators: `intitle:` becomes `TITLE:`, the
+    corpus is narrowed with `SRC:"PAT"`, and — the part that matters — a bare
+    space is a *phrase* match, not an AND. `jak2 imatinib combination` therefore
+    matched nothing at all, which is why every free-text novelty query came back
+    empty once it stopped going through Google.
+
+    So terms are ANDed explicitly, and because ANDing everything is brittle the
+    caller gets a ladder: all terms, then content terms only, then the two most
+    specific, then the single most specific. `_patent_search` walks it and stops
+    at the first query that returns anything.
+    """
+    q = re.sub(r"^\s*intitle:", "", query.strip(), flags=re.IGNORECASE)
+    q = q.replace('"', " ").strip()
+    if not q:
+        return []
+
+    if is_title:
+        # A title search is a phrase lookup by intent; relaxing it would return
+        # a different patent rather than the same one, so it stays exact.
+        return [f'(TITLE:"{q}") AND (SRC:"PAT")']
+
+    terms = [t for t in re.split(r"[^\w\-]+", q) if t]
+    if not terms:
+        return []
+    content = [t for t in terms if t.lower() not in _EPMC_GENERIC_TERMS] or terms
+
+    ladders: List[List[str]] = [terms, content, content[:2], content[:1]]
+    out, seen = [], set()
+    for group in ladders:
+        if not group:
+            continue
+        built = f'({" AND ".join(group)}) AND (SRC:"PAT")'
+        if built not in seen:
+            seen.add(built)
+            out.append(built)
+    return out
+
+
+async def _patent_search(query: str, num: int, call_type: str = "standard",
+                         is_title: bool = False) -> List[dict]:
+    """
+    Search the SureChEMBL patent corpus via Europe PMC.
+
+    Returns records in the shape the rest of this module already expects from a
+    search result — `patent_id`, `title`, `snippet`, `link` — so path extraction,
+    deduplication and reranking downstream are untouched.
+    """
+    queries = _epmc_queries(query, is_title)
+    if not queries:
+        return []
+    hits: List[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            for epmc_q in queries:
+                resp = await c.get(EUROPEPMC_SEARCH_URL, params={
+                    "query":      epmc_q,
+                    "format":     "json",
+                    "resultType": "core",
+                    "pageSize":   min(max(int(num), 1), _EPMC_MAX_PAGE_SIZE),
+                })
+                resp.raise_for_status()
+                hits = (resp.json().get("resultList") or {}).get("result") or []
+                if hits:
+                    break
+                logger.info("Europe PMC: no patents for %s — broadening", epmc_q)
+    except Exception:
+        logger.exception("Europe PMC patent search failed for: %s", query)
+        usage_tracker.record_serp(query=query, call_type=call_type,
+                                  results_returned=0, cost=0.0,
+                                  provider="europepmc")
+        return []
+
+    results = []
+    for h in hits:
+        pid = (h.get("id") or "").strip()
+        if not pid:
+            continue
+        results.append({
+            "patent_id": pid,
+            "title":     h.get("title") or "No title",
+            "snippet":   (h.get("abstractText") or "")[:500],
+            # Google Patents renders the same publication number, so existing
+            # links in saved results keep resolving.
+            "link":      f"https://patents.google.com/patent/{pid}/en",
+            "pubYear":   h.get("pubYear"),
+        })
+
+    usage_tracker.record_serp(query=query, call_type=call_type,
+                              results_returned=len(results), cost=0.0,
+                              provider="europepmc")
+    return results
+
+
 async def _serp_search(query: str, num: int,
                         call_type: str = "standard") -> List[dict]:
+    """
+    Legacy SerpAPI path, kept for a deployment that still sets SERPAPI_API_KEY.
+
+    `_patent_search` is the default; nothing calls this unless a key is present.
+    """
+    if not SERPAPI_API_KEY:
+        return await _patent_search(query, num, call_type)
     try:
         async with httpx.AsyncClient(timeout=30) as c:
             resp = await c.get("https://serpapi.com/search",
@@ -1368,15 +1499,18 @@ async def search_patents_only(query: str, num_results: int = 5,
     if is_title:
         fetch_n    = max(20, num_results * 3)
         raw        = query.strip('"\'')
-        r1, r2, r3 = await asyncio.gather(
-            _serp_search(raw,                fetch_n, call_type="title_standard"),
-            _serp_search(f'intitle:"{raw}"', fetch_n, call_type="title_intitle"),
-            _serp_search(f'"{raw}"',         fetch_n, call_type="title_quoted"),
+        # Two passes, not three: SerpAPI needed a bare, an `intitle:` and a quoted
+        # variant because Google scored them differently. Europe PMC has one
+        # title field, so the quoted pass returned exactly the `intitle:` set —
+        # a third of the calls for no additional patents.
+        r1, r2 = await asyncio.gather(
+            _patent_search(raw, fetch_n, call_type="title_standard"),
+            _patent_search(raw, fetch_n, call_type="title_intitle", is_title=True),
         )
-        all_organic = r1 + r2 + r3
+        all_organic = r1 + r2
     else:
         fetch_n     = max(20, num_results * 2) if rerank else num_results
-        all_organic = await _serp_search(query, fetch_n, call_type="standard")
+        all_organic = await _patent_search(query, fetch_n, call_type="standard")
 
     seen:    set  = set()
     results: list = []

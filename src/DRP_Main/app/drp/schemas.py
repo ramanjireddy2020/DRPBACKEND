@@ -452,6 +452,15 @@ class ChatMessage(_Wire):
 
 
 # ── CuraTeX ──────────────────────────────────────────────────────────────────
+#: Edited criterion values submitted with a profile. A criterion takes a number
+#: (the ideal value), a `{"min": x, "max": y}` range, or a string (the preferred
+#: category). Scoring normalises each candidate against these instead of the
+#: range learned from the target's known ligands — before this existed only
+#: `weights` were sent, so an edited value changed nothing and the UI had to
+#: label it "for reference, not sent".
+CriterionValues = Optional[Dict[str, Any]]
+
+
 class TargetProfileRequest(_Wire):
     target: str = Field(..., examples=["JAK2"])
     sourceSessionId: Optional[str] = None
@@ -459,6 +468,9 @@ class TargetProfileRequest(_Wire):
     # filter has nothing to exclude against, so the profile reports it inactive.
     disease: Optional[str] = None
     weights: Optional[Dict[str, float]] = None
+    values: CriterionValues = Field(
+        None, examples=[{"molecular_weight": {"min": 200, "max": 500}, "qed": 0.6}]
+    )
 
 
 class CurateCompoundsRequest(_Wire):
@@ -467,6 +479,9 @@ class CurateCompoundsRequest(_Wire):
     numResults: int = Field(20, ge=15, le=50)
     disease: Optional[str] = None
     weights: Optional[Dict[str, float]] = None
+    values: CriterionValues = Field(
+        None, examples=[{"molecular_weight": {"min": 200, "max": 500}, "qed": 0.6}]
+    )
 
 
 class CompoundPage(_Wire):

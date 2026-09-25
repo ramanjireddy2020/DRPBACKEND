@@ -40,16 +40,6 @@ class GooglePatentsError(RuntimeError):
     """SerpAPI or patents.google.com rejected a request or could not be reached."""
 
 
-def _require_key() -> str:
-    key = settings.SERPAPI_API_KEY
-    if not key:
-        raise GooglePatentsError(
-            "SERPAPI_API_KEY is not configured. NovSearch retrieves patents via "
-            "SerpAPI's google_patents engine — set SERPAPI_API_KEY."
-        )
-    return key
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  §3 step 2 — search
 # ══════════════════════════════════════════════════════════════════════════════
@@ -68,55 +58,90 @@ def search_terms(query: str) -> List[str]:
     return kept or tokens
 
 
+#: Europe PMC's patent corpus — the SureChEMBL patent set, over a documented REST
+#: endpoint with no key and no per-search charge. SerpAPI billed $0.015 a search
+#: against a 100/month free tier and then returned 429 "Your account has run out
+#: of searches", which failed every NovSearch run outright.
+EUROPEPMC_SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+
+
+def europepmc_queries(terms: List[str]) -> List[str]:
+    """
+    Progressively broader Europe PMC queries, narrowest first.
+
+    A bare space is a *phrase* match here, not an AND, so the terms are joined
+    explicitly. ANDing all of them is brittle — one ordinary word takes a real
+    result set to nothing — so the caller walks this ladder and stops at the
+    first rung that returns anything.
+    """
+    if not terms:
+        return []
+    ladders = [terms, terms[:3], terms[:2], terms[:1]]
+    out, seen = [], set()
+    for group in ladders:
+        if not group:
+            continue
+        built = f'({" AND ".join(group)}) AND (SRC:"PAT")'
+        if built not in seen:
+            seen.add(built)
+            out.append(built)
+    return out
+
+
 async def search_patents(query: str, size: int = 40) -> List[Dict[str, Any]]:
     """
-    Search for the query terms and return candidates in SerpAPI's relevance order.
+    Search the SureChEMBL patent corpus via Europe PMC.
 
-    That ordering is one of the two inputs to the reciprocal rank fusion in Tool 1,
-    so it is preserved as `api_rank` rather than being re-sorted here.
+    Relevance order is preserved as `api_rank` — it is one of the two inputs to
+    the reciprocal rank fusion in Tool 1 — so results are not re-sorted here.
     """
     terms = search_terms(query)
     if not terms:
         return []
 
-    key = _require_key()
-    params = {
-        "engine": "google_patents",
-        "q": " ".join(terms),
-        "num": min(size, 100),  # SerpAPI's google_patents caps per-page results at 100
-        "api_key": key,
-    }
+    queries = europepmc_queries(terms)
+    records: List[Dict[str, Any]] = []
     try:
         async with httpx.AsyncClient(timeout=settings.NOVSEARCH_REQUEST_TIMEOUT) as client:
-            resp = await client.get("https://serpapi.com/search", params=params)
+            for epmc_q in queries:
+                resp = await client.get(EUROPEPMC_SEARCH_URL, params={
+                    "query":      epmc_q,
+                    "format":     "json",
+                    "resultType": "core",
+                    "pageSize":   min(size, 1000),
+                })
+                if resp.status_code >= 400:
+                    raise GooglePatentsError(
+                        f"Europe PMC returned {resp.status_code}: {resp.text[:300]}"
+                    )
+                records = (resp.json().get("resultList") or {}).get("result") or []
+                if records:
+                    break
+                logger.info("Europe PMC: no patents for %s — broadening", epmc_q)
     except httpx.HTTPError as exc:
-        raise GooglePatentsError(f"SerpAPI google_patents search unreachable: {exc}") from exc
-    if resp.status_code >= 400:
-        raise GooglePatentsError(f"SerpAPI returned {resp.status_code}: {resp.text[:300]}")
-
-    payload = resp.json()
-    if "error" in payload:
-        raise GooglePatentsError(f"SerpAPI error: {payload['error']}")
+        raise GooglePatentsError(f"Europe PMC patent search unreachable: {exc}") from exc
 
     results: List[Dict[str, Any]] = []
-    for rank, record in enumerate(payload.get("organic_results", []), start=1):
-        pid = normalize_patent_id(_extract_patent_id(record))
+    for rank, record in enumerate(records, start=1):
+        pid = normalize_patent_id(record.get("id") or "")
         if not pid:
             continue
-        snippet = (record.get("snippet") or "").strip()
+        abstract = (record.get("abstractText") or "").strip()
+        patent_details = record.get("patentDetails") or {}
         results.append(
             {
                 "patent_id": pid,
                 "title": (record.get("title") or "").strip(),
-                "abstract": snippet,
-                "abstract_snippet": snippet[:500],
-                "assignee": _first(record.get("assignee")),
-                "filing_date": record.get("filing_date"),
-                "publication_date": record.get("publication_date") or record.get("grant_date"),
+                "abstract": abstract,
+                "abstract_snippet": abstract[:500],
+                "assignee": _first(patent_details.get("applicants")),
+                "filing_date": patent_details.get("filingDate"),
+                "publication_date": (record.get("firstPublicationDate")
+                                     or record.get("pubYear")),
                 "api_rank": rank,
             }
         )
-    logger.info("SerpAPI google_patents search '%s' → %d candidates", query, len(results))
+    logger.info("Europe PMC patent search '%s' → %d candidates", query, len(results))
     return results[:size]
 
 

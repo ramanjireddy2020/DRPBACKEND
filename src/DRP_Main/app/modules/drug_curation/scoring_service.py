@@ -87,6 +87,71 @@ def build_baselines(
     return baselines
 
 
+def apply_value_overrides(
+    baselines: Dict[str, CriterionBaseline],
+    values: Optional[Dict[str, Any]],
+) -> List[str]:
+    """
+    Replace the learned "good" values for a criterion with the researcher's own.
+
+    The profile screen let a user edit a criterion's value, but only weights were
+    ever sent for scoring, so the UI had to label those edits "for reference, not
+    sent" — the edit changed nothing. A baseline is what a candidate is scored
+    against, so overriding it here is what makes an edited value take effect.
+
+    Accepted per criterion:
+      * a number                     — the ideal value
+      * {"min": x, "max": y}         — the acceptable range
+      * {"value": x} / {"target": x} — same as a bare number
+      * a string                     — the preferred category
+
+    Returns a note per applied override, for the profile's `warnings`, so a run
+    scored against hand-entered values says so rather than looking learned.
+    """
+    notes: List[str] = []
+    if not values:
+        return notes
+
+    for key, raw in values.items():
+        baseline = baselines.get(key)
+        if baseline is None or raw is None or raw == "":
+            continue
+
+        if isinstance(raw, dict):
+            low = _as_float(raw.get("min"))
+            high = _as_float(raw.get("max"))
+            point = _as_float(raw.get("value", raw.get("target")))
+        else:
+            low = high = None
+            point = _as_float(raw)
+
+        if baseline.kind == NUMERIC:
+            if low is None and high is None and point is None:
+                continue
+            if low is not None or high is not None:
+                # A one-sided range keeps the observed bound on the other side,
+                # so "at most 500 Da" does not silently also pin the minimum.
+                baseline.minimum = low if low is not None else baseline.minimum
+                baseline.maximum = high if high is not None else baseline.maximum
+                mid = [v for v in (baseline.minimum, baseline.maximum) if v is not None]
+                baseline.median_value = round(sum(mid) / len(mid), 4) if mid else None
+                notes.append(f"{key}: scored against your range "
+                             f"{baseline.minimum}-{baseline.maximum}.")
+            else:
+                baseline.minimum = baseline.maximum = baseline.median_value = point
+                notes.append(f"{key}: scored against your value {point}.")
+        else:
+            text = str(raw.get("value", raw.get("target")) if isinstance(raw, dict) else raw)
+            if not text:
+                continue
+            # A categorical baseline scores by how common a value is among the
+            # ligands, so naming the preferred category means exactly that.
+            baseline.distribution = {text: max(baseline.count, 1)}
+            notes.append(f"{key}: scored against your preferred value '{text}'.")
+
+    return notes
+
+
 def normalize(criterion: Criterion, value: Any, baseline: Optional[CriterionBaseline]) -> Optional[float]:
     """
     Score one criterion for one candidate onto [0, 1], or None when unscoreable.
@@ -165,6 +230,12 @@ class CandidateScore:
     def as_dict(self) -> Dict[str, Any]:
         return {
             "compositeScore": round(self.composite, 2),
+            # `score` is the same number under the name every other module uses
+            # (TxKG targets, LitMineX articles, ScreenSuite hits all carry `score`).
+            # The results table was reading `score`, finding nothing and showing a
+            # blank column while `compositeScore` sat beside it. Both are emitted:
+            # nothing that already reads `compositeScore` has to change.
+            "score": round(self.composite, 2),
             "breakdown": [row.as_dict() for row in self.breakdown],
             "weightUsed": round(self.weight_used, 2),
             "weightAvailable": round(self.weight_available, 2),

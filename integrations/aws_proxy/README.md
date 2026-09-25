@@ -33,8 +33,8 @@ a new `/v1` endpoint is added on the backend side.
 | Variable | Value |
 |---|---|
 | `DATABRICKS_TOKEN_URL` | `https://dbc-96626831-6c96.cloud.databricks.com/oidc/v1/token` |
-| `DATABRICKS_CLIENT_ID` | `83535854-5015-4b8c-a6c9-0e2b048f0f3c` |
-| `DATABRICKS_CLIENT_SECRET` | the app's service-principal OAuth secret (valid until 2028-08-23) |
+| `DATABRICKS_CLIENT_ID` | `bf3c0157-b380-436b-9e3e-cec755eafd6c` (the `innodd-lambda-proxy` service principal) |
+| `DATABRICKS_CLIENT_SECRET` | an OAuth secret generated for that service principal |
 | `INNODD_BASE_URL` | `https://innodd-api-7474645714257046.aws.databricksapps.com` |
 | `DRP_EMAIL` | `priya@drp.app` (demo account — swap for a real one before production) |
 | `DRP_PASSWORD` | `drp-demo-password` |
@@ -42,6 +42,33 @@ a new `/v1` endpoint is added on the backend side.
 **Set these via AWS Secrets Manager / SSM Parameter Store references, not plain
 Lambda environment variables** — `DATABRICKS_CLIENT_SECRET` in particular is a
 live, long-lived credential.
+
+### Which service principal to use
+
+Use **`innodd-lambda-proxy`** (`bf3c0157-b380-436b-9e3e-cec755eafd6c`). It is a
+normal service principal, it holds `CAN_USE` on the `innodd-api` app, and OAuth
+secrets can be generated for it in the account console.
+
+Do **not** use `83535854-5015-4b8c-a6c9-0e2b048f0f3c`. That is the app's *own*
+auto-created principal (`app-2yztdm innodd-api`) — Databricks Apps creates and
+manages its credentials, so a `client_credentials` exchange against it fails with
+`invalid_client` no matter which secret you supply. Earlier revisions of this file
+and of the Postman collections named it by mistake, which is what caused every
+gateway route to return
+`502 {"error":"proxy_failure", ... 401 Unauthorized ... /oidc/v1/token}`.
+
+Verify a secret works before deploying it:
+
+```
+curl -s -X POST https://dbc-96626831-6c96.cloud.databricks.com/oidc/v1/token \
+  -d grant_type=client_credentials \
+  -d client_id=bf3c0157-b380-436b-9e3e-cec755eafd6c \
+  -d client_secret=<secret> \
+  -d scope=all-apis
+```
+
+A JSON body with `access_token` means it is good; `invalid_client` means the
+id/secret pair is wrong.
 
 ## Deploy
 

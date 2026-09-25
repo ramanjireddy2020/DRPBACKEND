@@ -14,7 +14,8 @@ import asyncio
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import quote
 
 from DRP_Main.app.core.config import settings
 from DRP_Main.app.core.logging import get_logger
@@ -399,7 +400,8 @@ def _readable_path(path: Dict[str, Any]) -> str:
     return " ".join(out)
 
 
-def _discovery_targets(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _discovery_targets(candidates: List[Dict[str, Any]],
+                       disease_name: str = "") -> List[Dict[str, Any]]:
     """
     Map the discovery service's candidate records onto the wire `Target` shape.
 
@@ -462,9 +464,76 @@ def _discovery_targets(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                     if src
                 }
             ),
+            # Same sources, resolved to the record that backs the claim so the
+            # Sources panel can link to it instead of a database home page.
+            "supportingSourceLinks": _source_links(
+                c.get("supporting_sources")
+                or sorted(
+                    {
+                        src
+                        for path in c.get("paths", [])
+                        for src in (path.get("edge_sources") or [])
+                        if src
+                    }
+                ),
+                c["uniprot_id"],
+                c.get("gene_name") or "",
+                disease_name,
+            ),
         }
         for c in candidates
     ]
+
+
+#: Source phrase → a deep link into that database for a specific protein.
+#: `supportingSources` carries prose like "IntAct curated protein interactions",
+#: which is all the UI had to work with, so every "Sources" link could only open
+#: a database home page. These resolve to the record that actually backs the
+#: claim. Matched on a keyword because one phrase names several databases
+#: ("Reactome / KEGG / SMPDB pathway membership").
+_SOURCE_LINKS: List[Tuple[str, str, str]] = [
+    ("ctd",      "CTD",      "https://ctdbase.org/detail.go?type=gene&acc={gene}"),
+    ("medgen",   "MedGen",   "https://www.ncbi.nlm.nih.gov/medgen/?term={disease}"),
+    ("intact",   "IntAct",   "https://www.ebi.ac.uk/intact/search?query={uniprot}"),
+    ("reactome", "Reactome", "https://reactome.org/content/query?q={uniprot}&species=Homo+sapiens"),
+    ("kegg",     "KEGG",     "https://www.genome.jp/dbget-bin/www_bfind_sub?dbkey=genes&keywords={gene}"),
+    ("smpdb",    "SMPDB",    "https://smpdb.ca/search?query={uniprot}"),
+    ("uniprot",  "UniProt",  "https://www.uniprot.org/uniprotkb/{uniprot}/entry"),
+    ("go ",      "QuickGO",  "https://www.ebi.ac.uk/QuickGO/annotations?geneProductId={uniprot}"),
+    ("disgenet", "DisGeNET", "https://www.disgenet.org/search?q={gene}"),
+]
+
+
+def _source_links(sources: Sequence[str], uniprot: str, gene: str,
+                  disease: str) -> List[Dict[str, str]]:
+    """Resolve source phrases to `{name, url}` records for the Sources panel."""
+    out: List[Dict[str, str]] = []
+    seen = set()
+    for phrase in sources or []:
+        low = (phrase or "").lower()
+        for needle, name, template in _SOURCE_LINKS:
+            if needle not in low or name in seen:
+                continue
+            # A template needs the identifier it interpolates; without one the
+            # link would land on a search page for an empty string, which is the
+            # home-page behaviour this replaces.
+            if "{uniprot}" in template and not uniprot:
+                continue
+            if "{gene}" in template and not gene:
+                continue
+            if "{disease}" in template and not disease:
+                continue
+            seen.add(name)
+            out.append({
+                "name": name,
+                "url": template.format(
+                    uniprot=quote(uniprot or ""),
+                    gene=quote(gene or ""),
+                    disease=quote(disease or ""),
+                ),
+                "describes": phrase,
+            })
+    return out
 
 
 async def _run_txkg_on_databricks(params: Dict[str, Any], ctx: JobContext) -> Dict[str, Any]:
@@ -599,7 +668,7 @@ async def run_txkg_query(params: Dict[str, Any], ctx: JobContext) -> Dict[str, A
     known = payload["candidates"]["known"]
     hidden = payload["candidates"]["hidden"]
     ordered = sorted(known + hidden, key=lambda c: -c["corrected_score"])
-    targets = _discovery_targets(ordered)
+    targets = _discovery_targets(ordered, disease_name)
     counts = payload["counts"]
 
     _persist_txkg_targets(ctx, ordered, targets)
@@ -676,7 +745,10 @@ async def run_subgraph_generate(params: Dict[str, Any], ctx: JobContext) -> Dict
 async def run_metapath_analyze(params: Dict[str, Any], ctx: JobContext) -> Dict[str, Any]:
     """Meta-path reasoning over the disease of a previously generated graph."""
     await _load_txkg()
-    from DRP_Main.app.api.v1.endpoints.txkg_test import get_metapaths_for_disease
+    from DRP_Main.app.api.v1.endpoints.txkg_test import (
+        CONTEXT_TYPE_WEIGHTS,
+        get_metapaths_for_disease,
+    )
 
     disease = params.get("disease") or ""
     if not disease:
@@ -741,6 +813,25 @@ async def run_metapath_analyze(params: Dict[str, Any], ctx: JobContext) -> Dict[
         },
         "scores": scores,
         "traversals": traversals,
+        # What the two numbers on a meta-path row actually mean. They were being
+        # read off the screen with no stated definition, so "score 0.3" could not
+        # be told apart from a probability or a percentage.
+        "scoreDefinitions": {
+            "score": "Aggregate meta-path support for this target: the sum of its "
+                     "paths weighted by contextScore, so many weak PPI hops never "
+                     "outrank a single pathway-mediated connection. Higher is "
+                     "stronger support; it is not a probability and has no fixed "
+                     "maximum.",
+            "contextScore": "Biological plausibility of the intermediate node that "
+                            "links disease to target, from 1.0 down to 0.2. A shared "
+                            "pathway (1.0) is stronger evidence than a shared "
+                            "biological process (0.9), which beats a bare "
+                            "protein-protein interaction (0.3) — guilt by "
+                            "association only.",
+            "contextWeights": dict(CONTEXT_TYPE_WEIGHTS),
+            "totalPaths": "How many distinct connecting paths were reconstructed "
+                          "for this target within the hop budget.",
+        },
     }
 
 
@@ -1259,6 +1350,7 @@ async def run_curatex_target_profile(params: Dict[str, Any], ctx: JobContext) ->
             target=target,
             disease=params.get("disease"),
             weights=params.get("weights"),
+            values=params.get("values"),
             session_id=ctx.session_id or f"job:{ctx.job_id}",
         )
     except CurateXError as exc:
@@ -1309,6 +1401,7 @@ async def run_curatex_compounds(params: Dict[str, Any], ctx: JobContext) -> Dict
             target=target,
             disease=params.get("disease"),
             weights=params.get("weights"),
+            values=params.get("values"),
             top_n=int(params.get("numResults", 25)),
             session_id=ctx.session_id or f"job:{ctx.job_id}",
         )

@@ -22,6 +22,7 @@ from DRP_Main.app.modules.drug_curation.profile_service import (
 )
 from DRP_Main.app.modules.drug_curation.scoring_service import (
     CandidateScore,
+    apply_value_overrides,
     score_candidate,
     score_drivers,
 )
@@ -202,6 +203,7 @@ def match_and_score(
     enrich_top_n: Optional[int] = None,
     min_phase: Optional[int] = None,
     weights: Optional[Dict[str, float]] = None,
+    values: Optional[Dict[str, Any]] = None,
 ) -> CandidateSet:
     """
     Run Tool 2 end to end against a (possibly user-edited) profile.
@@ -222,6 +224,15 @@ def match_and_score(
     active_weights = dict(profile.weights)
     if weights:
         active_weights.update({k: float(v) for k, v in weights.items() if k in active_weights})
+
+    # Criterion values edited on the profile screen and submitted with the run.
+    # They replace the baselines learned from the ligand set, which is what makes
+    # an edited value change the ranking rather than just the display.
+    if values:
+        notes = apply_value_overrides(profile.baselines, values)
+        for note in notes:
+            if note not in profile.warnings:
+                profile.warnings.append(note)
 
     universe = search_candidate_universe(limit=limit, min_phase=min_phase)
     survivors, removed = apply_exclusion_filter(universe, profile.exclusion)

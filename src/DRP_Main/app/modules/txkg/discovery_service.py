@@ -1347,6 +1347,12 @@ def score_candidates(
             "hidden_threshold": hidden_threshold,
             "correction_method": correction["method"],
             "propagation_seconds": round(propagation_seconds, 2),
+            # The labels were being read off the table with no way to find out
+            # what they meant — "Well-explored" against "High" tells a researcher
+            # nothing about which is the better lead, or what counts as explored.
+            # The thresholds are published with the results rather than living
+            # only in this file.
+            "label_definitions": label_definitions(hidden_threshold),
         },
     )
 
@@ -1408,6 +1414,66 @@ _NOVELTY_BANDS = (
     (10, "Moderate"),
     (50, "Low"),
 )
+
+
+def label_definitions(hidden_threshold: float) -> Dict[str, Any]:
+    """
+    What every label on a target row means, in the same response as the labels.
+
+    Derived from `_NOVELTY_BANDS` rather than restated, so a change to the bands
+    cannot leave the published definitions describing the old behaviour.
+    """
+    bands, previous = [], None
+    for ceiling, label in _NOVELTY_BANDS:
+        if previous is None:
+            rng = f"{ceiling} hits" if ceiling == 0 else f"up to {ceiling} hits"
+        else:
+            rng = f"{previous + 1}-{ceiling} hits"
+        bands.append({"label": label, "range": rng})
+        previous = ceiling
+    bands.append({"label": "Well-explored", "range": f"more than {previous} hits"})
+    bands.append({"label": "Unknown", "range": "hit counts unavailable for this target"})
+
+    return {
+        "category": {
+            "meaning": "Whether the knowledge graph already records this protein as "
+                       "associated with the disease.",
+            "values": [
+                {"label": "Known/Direct",
+                 "definition": f"A curated {CURATED_DISEASE_ASSOC_EDGE} edge already links "
+                               "the protein to the disease."},
+                {"label": "Hidden/Novel",
+                 "definition": "No curated disease-gene edge exists, and the degree-corrected "
+                               f"relevance score clears the {hidden_threshold} threshold "
+                               "(-log10 p) — the graph connects them, the literature has not "
+                               "recorded it as an association."},
+            ],
+        },
+        "noveltyLabel": {
+            "meaning": "How much existing patent and literature coverage the protein already "
+                       "has for this disease — combined hits, counted independently of the "
+                       "graph. High means least explored, so most novel.",
+            "values": bands,
+        },
+        "sourcingStatus": {
+            "meaning": "Whether the connecting path survives the edge-level sourcing gate.",
+            "values": [
+                {"label": "confirmed",
+                 "definition": "At least one connecting path is sourced end to end — every "
+                               "edge on it comes from a named curated database."},
+                {"label": "curated",
+                 "definition": "Backed by the curated disease-gene association itself."},
+                {"label": "unsourced",
+                 "definition": "Every connecting path relies on an unsourced or low-confidence "
+                               "edge; reported but flagged as unconfirmed."},
+            ],
+        },
+        "score": {
+            "meaning": "Relevance out of 100, relative to the strongest target in the same run. "
+                       "`correctedScore` is the underlying -log10(p) from the degree-corrected "
+                       "random walk and is unbounded; `score` is what to display.",
+        },
+    }
 
 #: NCBI allows 3 requests/second without an API key, 10 with one. Exceeding it returns
 #: 429s that would silently turn every novelty label into "Unknown", so every eutils
@@ -1543,33 +1609,47 @@ async def _patent_search(disease_name: str, target_name: str) -> Tuple[Optional[
             _NOVELTY_AGENT_AVAILABLE = False
             print(
                 f"      ℹ️  Novelty agent unavailable for patents ({str(exc).splitlines()[0]})"
-                " — using direct SerpAPI for the rest of this run"
+                " — using Europe PMC directly for the rest of this run"
             )
 
-    api_key = os.getenv("SERPAPI_API_KEY")
-    if not api_key:
-        return None, []
+    # Europe PMC's patent corpus (SureChEMBL), not SerpAPI: this runs once per
+    # candidate, so a metered $0.015 search was the single largest cost in a run
+    # and the first thing to fail when the quota ran out — which silently turned
+    # every novelty label into "Unknown".
     import httpx
+
+    terms = [t for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9\-]*", query or "") if len(t) > 2]
+    if not terms:
+        return None, []
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as http:
-            resp = await http.get(
-                "https://serpapi.com/search",
-                params={"engine": "google_patents", "q": query, "api_key": api_key, "num": 10},
-            )
-        if resp.status_code != 200:
-            return None, []
-        data = resp.json()
-        organic = data.get("organic_results", []) or []
+            hits, total = [], None
+            for group in ([terms, terms[:2], terms[:1]]):
+                resp = await http.get(
+                    "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                    params={
+                        "query": f'({" AND ".join(group)}) AND (SRC:"PAT")',
+                        "format": "json", "resultType": "core", "pageSize": 10,
+                    },
+                )
+                if resp.status_code != 200:
+                    return None, []
+                data = resp.json()
+                hits = (data.get("resultList") or {}).get("result") or []
+                if hits:
+                    # `hitCount` is the corpus-wide total, which is what the
+                    # novelty label is thresholded against — not the page size.
+                    total = data.get("hitCount")
+                    break
         patents = [
             {
-                "id": str(r.get("patent_id") or r.get("publication_number") or ""),
+                "id": str(r.get("id") or ""),
                 "title": r.get("title", ""),
-                "url": r.get("link", ""),
+                "url": f"https://europepmc.org/article/PAT/{r.get('id')}" if r.get("id") else "",
             }
-            for r in organic
+            for r in hits
         ]
-        total = data.get("search_information", {}).get("total_results")
         return (int(total) if total is not None else len(patents)), patents
     except Exception as exc:  # noqa: BLE001
         print(f"      ⚠️  Patent lookup failed for {target_name}: {exc}")
@@ -1662,17 +1742,23 @@ async def interpret_candidates(
 
     prompt = f"""You are a biomedical research assistant reporting knowledge-graph target predictions for {disease_name}.
 
-Each candidate below was scored by degree-corrected random-walk-with-restart propagation over the
+Each target below was scored by degree-corrected random-walk-with-restart propagation over the
 full knowledge graph, labelled Known/Direct or Hidden/Novel by whether a curated disease-gene
 association already exists, and checked for edge-level sourcing.
 
 {chr(10).join(blocks)}
 
-For each candidate, explain in plain language why it is being surfaced. Ground every claim in the
+For each target, explain in plain language why it is being surfaced. Ground every claim in the
 connecting path and the retrieved literature shown above — do not restate the score as if it were
-evidence, and do not introduce facts that are not present above. Note explicitly where a candidate
-is Hidden but already heavily covered in the literature, and where a candidate is unconfirmed by
-the sourcing check. Keep it to 2-3 sentences per candidate."""
+evidence, and do not introduce facts that are not present above. Note explicitly where a target
+is Hidden but already heavily covered in the literature, and where a target is unconfirmed by
+the sourcing check. Keep it to 2-3 sentences per target.
+
+These are protein targets, so call them "targets" — never "candidates".
+
+Begin directly with the first target. Do not write an introductory line such as
+"Here are the explanations..." — the UI renders this text immediately under the
+user's question, so any preamble reads as filler."""
 
     def _call() -> str:
         # Databricks Model Serving, the same path txkg_test's own interpretation
@@ -1698,7 +1784,7 @@ the sourcing check. Keep it to 2-3 sentences per candidate."""
     try:
         # `llm_client.databricks` returns the completion text directly, unlike the
         # OpenAI-shaped response object the Groq client returned.
-        return (await asyncio.to_thread(_call)).strip()
+        return _strip_preamble((await asyncio.to_thread(_call)).strip())
     except Exception as exc:  # noqa: BLE001 — fall back to a factual, ungenerated summary
         print(f"   ⚠️  LLM interpretation unavailable: {exc}")
         lines = [f"LLM interpretation unavailable ({exc}). Factual summary:"]
@@ -1710,6 +1796,22 @@ the sourcing check. Keep it to 2-3 sentences per candidate."""
                 f"novelty {cand.get('novelty_label', 'Unknown')}."
             )
         return "\n".join(lines)
+
+
+#: An opening line that only announces what follows ("Here are the explanations for
+#: each candidate:"). The UI prints this interpretation directly beneath the user's
+#: own question, where such a line is pure filler — and it is the one place the word
+#: "candidate" kept reaching the screen. Asking the model not to write one is not
+#: reliable on its own, so the lead-in is also removed here.
+_PREAMBLE_RE = re.compile(
+    r"^\s*(?:here\s+(?:are|is)|below\s+(?:are|is)|the\s+following\s+(?:are|is))\b[^\n:]*:\s*\n+",
+    re.IGNORECASE,
+)
+
+
+def _strip_preamble(text: str) -> str:
+    """Drop a leading 'Here are the explanations...:' line from an interpretation."""
+    return _PREAMBLE_RE.sub("", text or "", count=1).lstrip()
 
 
 # --------------------------------------------------------------------------------------
@@ -1747,9 +1849,26 @@ def build_ranked_table(scored: ScoredCandidates) -> List[Dict[str, Any]]:
     return rows
 
 
+def relevance_out_of_100(scored: "ScoredCandidates", candidate: Dict[str, Any]) -> str:
+    """
+    A candidate's relevance as the 0-100 figure the UI shows.
+
+    `corrected_score` is -log10(p) and unbounded — 131.5 in a recent run — so
+    quoting it in a sentence aimed at a researcher reads as a broken percentage.
+    The API already normalises it against the strongest candidate in the same run
+    for the `score` column; this states the recommendation in those same terms so
+    the number in the prose matches the number in the table.
+    """
+    top = max((float(c.get("corrected_score") or 0.0)
+               for c in scored.all_candidates()), default=0.0)
+    value = float(candidate.get("corrected_score") or 0.0)
+    pct = round(100.0 * value / top, 1) if top > 0 else 0.0
+    return f"relevance {pct}/100"
+
+
 def build_recommendation(scored: ScoredCandidates) -> Dict[str, Any]:
     """
-    §10 — always names the specific candidate(s) and states which factors drove it.
+    §10 — always names the specific target(s) and states which factors drove it.
     """
     confirmed_hidden = [c for c in scored.hidden if c.get("confirmed")]
     under_explored = [
@@ -1767,7 +1886,7 @@ def build_recommendation(scored: ScoredCandidates) -> Dict[str, Any]:
             "candidates": [best["uniprot_id"]],
             "text": (
                 f"Run a deeper literature check on {best['name']} ({best['uniprot_id']}) next. "
-                f"It is Hidden/Novel with a corrected score of {best['corrected_score']}, its connecting "
+                f"It is Hidden/Novel with {relevance_out_of_100(scored, best)}, its connecting "
                 f"path is sourced end to end ({best['sourcing_note']}), and its novelty label is "
                 f"{best['novelty_label']} ({best.get('combined_hits')} existing patent/literature hits) — "
                 "it is the least externally validated candidate and benefits most from a closer look."
@@ -1784,10 +1903,11 @@ def build_recommendation(scored: ScoredCandidates) -> Dict[str, Any]:
             "candidates": [best["uniprot_id"], top_known["uniprot_id"]],
             "text": (
                 f"Both groups have a strong, confirmed entry: {best['name']} "
-                f"({best['uniprot_id']}, Hidden/Novel, corrected score {best['corrected_score']}, "
+                f"({best['uniprot_id']}, Hidden/Novel, {relevance_out_of_100(scored, best)}, "
                 f"sourcing {best['sourcing_status']}, novelty {best.get('novelty_label', 'Unknown')}) "
-                f"and {top_known['name']} ({top_known['uniprot_id']}, Known/Direct, corrected score "
-                f"{top_known['corrected_score']}, backed by a curated disease association). "
+                f"and {top_known['name']} ({top_known['uniprot_id']}, Known/Direct, "
+                f"{relevance_out_of_100(scored, top_known)}, backed by a curated "
+                "disease association). "
                 "Neither Hidden entry is under-explored, so there is no clear winner: the Hidden target "
                 "is the less externally validated of the two, the Known target is the safer route into "
                 "drug candidate generation."
@@ -1803,7 +1923,7 @@ def build_recommendation(scored: ScoredCandidates) -> Dict[str, Any]:
             "candidates": [best["uniprot_id"]],
             "text": (
                 f"Run a deeper literature check on {best['name']} ({best['uniprot_id']}). It is the "
-                f"strongest confirmed Hidden candidate (corrected score {best['corrected_score']}, sourced "
+                f"strongest confirmed Hidden target ({relevance_out_of_100(scored, best)}, sourced "
                 f"path) and there is no Known target to fall back on, though its novelty label is "
                 f"{best.get('novelty_label', 'Unknown')} — existing coverage suggests it may already be "
                 "actively pursued."
