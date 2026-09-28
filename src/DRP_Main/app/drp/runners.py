@@ -1684,7 +1684,14 @@ async def run_screensuite_screen(params: Dict[str, Any], ctx: JobContext) -> Dic
 
     target = (params.get("target") or "").strip()
     if not target:
-        raise RunnerError("target is required")
+        # Reached when a hand-off carries no selected protein. The disease used
+        # to stand in here, so compounds were screened against "thrombocytosis"
+        # and failed later, and less legibly, inside structure resolution.
+        raise RunnerError(
+            "ScreenSuite docks compounds against a protein structure, and no "
+            "protein was selected. Pick a target from the TxKG results, or name "
+            'one in your request — for example "dock JAK2 with imatinib".'
+        )
 
     if execution.should_delegate("ScreenSuite"):
         return await _run_screensuite_on_databricks(params, ctx)

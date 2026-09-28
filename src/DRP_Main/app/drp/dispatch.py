@@ -212,6 +212,15 @@ _NOT_A_COMPOUND = _INSTRUCTION_WORDS | {
 }
 
 
+#: A message that is actually asking for a docking run, rather than a session
+#: query being carried forward into one.
+_DOCK_INTENT = re.compile(r"\b(dock(?:ing)?|screen(?:ing)?|binding affinity)\b", re.I)
+
+
+def _asks_to_dock(query: str) -> bool:
+    return bool(_DOCK_INTENT.search(query or ""))
+
+
 def compounds_from_text(query: str, target: str = "") -> list[dict]:
     """
     Compound names read out of a docking instruction, as the runner's payload.
@@ -378,17 +387,24 @@ def build_params(
         }
 
     if module == "ScreenSuite":
-        target = chosen or resolve_target(query, subject)
+        # Docking needs a *protein*: the selected target, or a gene symbol named
+        # in the message. Never the leftover phrase — on a TxKG-led session that
+        # is the disease, and a hand-off with no selection screened compounds
+        # against "thrombocytosis". An empty target is better than a wrong one;
+        # the runner says what is missing.
+        target = chosen or extract_gene_symbol(query)
+        compounds = selections.get("compounds") or []
+        if not compounds and _asks_to_dock(query):
+            # Only parse ligands from a message that actually asks to dock.
+            # The session query carries forward unchanged, so a hand-off from
+            # "find protein targets for thrombocytosis" was reading the disease
+            # as a compound to screen.
+            compounds = compounds_from_text(query, target)
         return {
             "target": target,
             "compoundLibrary": selections.get("compoundLibrary"),
             # CurateX's "View in ScreenSuite" sends the chosen compounds here.
-            # Falling back to the message text is what makes "dock jak2 with
-            # imatinib" work: before, compounds came only from selections, so a
-            # conversational request sent an empty list and the runner answered
-            # "Name at least one compound to screen" with imatinib right there
-            # in the sentence.
-            "compounds": selections.get("compounds") or compounds_from_text(query, target),
+            "compounds": compounds,
         }
 
     if module == "SaaS Pipeline":
