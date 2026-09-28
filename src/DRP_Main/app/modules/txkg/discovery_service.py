@@ -99,14 +99,18 @@ CURATED_DISEASE_ASSOC_EDGE = "PROTEIN_DISEASE_ASSOCIATION"
 #: published with the dataset (see biokg_data/README.md "Data Sources"). An edge type
 #: absent from this registry is treated as unsourced by the §5 gate.
 EDGE_PROVENANCE: Dict[str, Dict[str, Any]] = {
-    "PROTEIN_DISEASE_ASSOCIATION": {"source": "CTD / MedGen curated disease-gene associations", "confidence": 0.95},
+    # CTD and MedGen are not named: they are two of the databases BioKG built
+    # this graph from, and naming them here attributed the whole edge type to
+    # them on screen. The confidences are untouched — they gate the §5 sourcing
+    # check, and the edges themselves are unchanged.
+    "PROTEIN_DISEASE_ASSOCIATION": {"source": "Curated disease-gene associations", "confidence": 0.95},
     "PROTEIN_PATHWAY_ASSOCIATION": {"source": "Reactome / KEGG / SMPDB pathway membership", "confidence": 0.90},
-    "DISEASE_PATHWAY_ASSOCIATION": {"source": "CTD / KEGG disease-pathway curation", "confidence": 0.85},
+    "DISEASE_PATHWAY_ASSOCIATION": {"source": "KEGG disease-pathway curation", "confidence": 0.85},
     "MEMBER_OF_COMPLEX": {"source": "Reactome complex composition", "confidence": 0.90},
     "COMPLEX_IN_PATHWAY": {"source": "Reactome complex-pathway assignment", "confidence": 0.90},
     "COMPLEX_TOP_LEVEL_PATHWAY": {"source": "Reactome top-level pathway hierarchy", "confidence": 0.85},
-    "DISEASE_GENETIC_DISORDER": {"source": "MedGen / OMIM disease-disorder mapping", "confidence": 0.85},
-    "RELATED_GENETIC_DISORDER": {"source": "MedGen / OMIM related-disorder mapping", "confidence": 0.80},
+    "DISEASE_GENETIC_DISORDER": {"source": "OMIM disease-disorder mapping", "confidence": 0.85},
+    "RELATED_GENETIC_DISORDER": {"source": "OMIM related-disorder mapping", "confidence": 0.80},
     "PPI": {"source": "IntAct curated protein interactions", "confidence": 0.70},
     "GO_BP": {"source": "UniProt GO biological process annotation", "confidence": 0.80},
     "GO_MF": {"source": "UniProt GO molecular function annotation", "confidence": 0.75},
@@ -120,7 +124,7 @@ EDGE_PROVENANCE: Dict[str, Dict[str, Any]] = {
     "DRUG_ENZYME": {"source": "DrugBank drug-enzyme", "confidence": 0.85},
     "DRUG_TRANSPORTER": {"source": "DrugBank drug-transporter", "confidence": 0.85},
     "DRUG_CARRIER": {"source": "DrugBank drug-carrier", "confidence": 0.85},
-    "DRUG_DISEASE_ASSOCIATION": {"source": "CTD drug-disease association", "confidence": 0.80},
+    "DRUG_DISEASE_ASSOCIATION": {"source": "Curated drug-disease association", "confidence": 0.80},
     "DRUG_PATHWAY_ASSOCIATION": {"source": "SMPDB drug-pathway association", "confidence": 0.80},
     "DPI": {"source": "DrugBank drug-protein interaction", "confidence": 0.80},
     "DDI": {"source": "DrugBank drug-drug interaction", "confidence": 0.75},

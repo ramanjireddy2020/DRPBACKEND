@@ -499,8 +499,9 @@ def _discovery_targets(candidates: List[Dict[str, Any]],
 #: claim. Matched on a keyword because one phrase names several databases
 #: ("Reactome / KEGG / SMPDB pathway membership").
 _SOURCE_LINKS: List[Tuple[str, str, str]] = [
-    ("ctd",      "CTD",      "https://ctdbase.org/detail.go?type=gene&acc={gene}"),
-    ("medgen",   "MedGen",   "https://www.ncbi.nlm.nih.gov/medgen/?term={disease}"),
+    # CTD and MedGen are deliberately absent — the source phrases no longer name
+    # them, so there is nothing to match, and linking out to them attributed the
+    # edge to one database when several contributed.
     ("intact",   "IntAct",   "https://www.ebi.ac.uk/intact/search?query={uniprot}"),
     ("reactome", "Reactome", "https://reactome.org/content/query?q={uniprot}&species=Homo+sapiens"),
     ("kegg",     "KEGG",     "https://www.genome.jp/dbget-bin/www_bfind_sub?dbkey=genes&keywords={gene}"),

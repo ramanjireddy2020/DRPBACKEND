@@ -183,7 +183,9 @@ def txkg_insights(
 #: stores which database asserted a relationship but not that database's own record
 #: id, so these link to the database rather than to the specific assertion.
 _DATABASE_HOMES = {
-    "ctd": ("Comparative Toxicogenomics Database", "https://ctdbase.org/"),
+    # CTD and MedGen are deliberately absent: the edge source phrases no longer
+    # name them, so nothing resolves here, and listing them attributed an edge
+    # that several databases contributed to a single one.
     "disgenet": ("DisGeNET", "https://www.disgenet.org/"),
     "drugbank": ("DrugBank", "https://go.drugbank.com/"),
     "kegg": ("KEGG", "https://www.genome.jp/kegg/"),
