@@ -746,7 +746,7 @@ def _answer_follow_up(db: OrmSession, step: Optional[DrpSessionStep], question: 
 
         from DRP_Main.app.core.llm import llm_client
 
-        return llm_client.databricks(
+        return llm_client.chat(
             [
                 {
                     "role": "system",

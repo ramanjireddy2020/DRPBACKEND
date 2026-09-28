@@ -260,6 +260,51 @@ def category_totals(weights: Optional[Dict[str, float]] = None) -> Dict[str, flo
     return totals
 
 
+#: Every name a criterion answers to: its key, its label, its number, and a
+#: normalised form of each. The profile table is rendered from `label`, so a
+#: client that edits weights in place naturally sends those labels back — and
+#: every one was rejected as "Unknown criterion 'Withdrawn status'", failing the
+#: whole run with "At least one criterion must carry a positive weight". Keys are
+#: what the scorer uses; this is how anything else gets there.
+def _alias_key(text: str) -> str:
+    return "".join(ch for ch in str(text).lower() if ch.isalnum())
+
+
+CRITERION_ALIASES: Dict[str, str] = {}
+for _criterion in ALL_ROWS:
+    for _alias in (_criterion.key, _criterion.label, _criterion.number):
+        if _alias:
+            CRITERION_ALIASES[str(_alias)] = _criterion.key
+            CRITERION_ALIASES[_alias_key(_alias)] = _criterion.key
+
+
+def canonical_criterion(name: str) -> Optional[str]:
+    """The criterion key `name` refers to — key, label or number — or None."""
+    if name in CRITERIA_BY_KEY:
+        return name
+    return CRITERION_ALIASES.get(str(name)) or CRITERION_ALIASES.get(_alias_key(name))
+
+
+def normalize_weight_table(weights: Optional[Dict[str, float]]) -> Dict[str, float]:
+    """
+    Re-key a weight table onto criterion keys, dropping what cannot be resolved.
+
+    Unresolvable entries are dropped rather than raised on: a client that adds
+    its own row should not fail everyone's run, and `validate_weight_table` still
+    reports anything unknown.
+    """
+    out: Dict[str, float] = {}
+    for name, value in (weights or {}).items():
+        key = canonical_criterion(name)
+        if key is None:
+            continue
+        try:
+            out[key] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def validate_weight_table(weights: Dict[str, float]) -> List[str]:
     """
     Check a user-edited weight table. Returns human-readable problems; an empty
@@ -268,19 +313,30 @@ def validate_weight_table(weights: Dict[str, float]) -> List[str]:
     Weights are *not* forced back to 100 — §4.2's composite divides by the sum of
     the weights that actually had data, so any positive scale produces the same
     ranking. Only unknown keys and negatives are real errors.
+
+    Labels and criterion numbers are accepted as well as keys, because that is
+    what the profile screen has on hand when the researcher edits a row.
     """
     problems: List[str] = []
-    for key, value in weights.items():
-        if key not in CRITERIA_BY_KEY:
-            problems.append(f"Unknown criterion '{key}'")
+    resolved: Dict[str, float] = {}
+    for name, value in weights.items():
+        key = canonical_criterion(name)
+        if key is None:
+            problems.append(f"Unknown criterion '{name}'")
             continue
+        resolved[key] = value
+
+    for key, value in resolved.items():
         try:
             if float(value) < 0:
                 problems.append(f"Weight for '{key}' is negative")
         except (TypeError, ValueError):
             problems.append(f"Weight for '{key}' is not a number")
+    # Checked against the resolved table: the unresolved one counted no positive
+    # weights when every name was a label, so this fired on a table that was
+    # actually fine.
     if weights and not any(
-        float(v or 0) > 0 for k, v in weights.items() if k in CRITERIA_BY_KEY
+        float(v or 0) > 0 for k, v in resolved.items() if k in CRITERIA_BY_KEY
     ):
         problems.append("At least one criterion must carry a positive weight")
     return problems

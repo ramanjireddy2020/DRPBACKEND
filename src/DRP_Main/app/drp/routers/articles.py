@@ -172,29 +172,46 @@ def _answer_from_article(article: DrpArticle, question: str) -> str:
     if not context:
         return "This article has no abstract text stored, so I cannot answer from its content."
 
-    if settings.DATABRICKS_HOST and settings.DATABRICKS_TOKEN:
-        try:
-            from DRP_Main.app.core.llm import llm_client
+    # No provider gate: `llm_client.chat` tries Databricks, then Groq, then
+    # Gemini, and raises only when none is configured. This used to be gated on
+    # DATABRICKS_TOKEN, which the deployed app does not set — so no LLM was ever
+    # called and every question about an article was answered with the abstract's
+    # opening sentences.
+    try:
+        from DRP_Main.app.core.llm import llm_client
 
-            answer = llm_client.databricks(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a biomedical research assistant. Answer only from the "
-                        "provided abstract. If the abstract does not cover the question, say so.",
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Title: {article.title}\nAbstract: {context}\n\n"
-                        f"Question: {question}",
-                    },
-                ],
-                temperature=0.2,
-                max_tokens=500,
-            )
+        answer = llm_client.chat(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a biomedical research assistant helping a researcher "
+                        "read one paper. Answer their question about it.\n\n"
+                        "Use the abstract as your source wherever it covers the "
+                        "question, and quote or paraphrase what it actually says. "
+                        "Where the abstract does not cover it, say so in a clause — "
+                        "not as the whole answer — and then answer from general "
+                        "biomedical knowledge if you reliably can, making clear that "
+                        "part is background rather than from this paper. A plain "
+                        "question such as what a gene or a term means deserves a "
+                        "plain answer, not a refusal.\n\n"
+                        "Never invent findings, numbers or citations and attribute "
+                        "them to this paper. Address the reader as \"you\"."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Title: {article.title}\nAbstract: {context}\n\n"
+                    f"Question: {question}",
+                },
+            ],
+            temperature=0.2,
+            max_tokens=500,
+        )
+        if answer and answer.strip():
             return answer.strip()
-        except Exception as exc:  # noqa: BLE001 — fall back rather than 500
-            logger.warning("article chat LLM call failed, using extractive fallback: %s", exc)
+    except Exception as exc:  # noqa: BLE001 — fall back rather than 500
+        logger.warning("article chat LLM call failed, using extractive fallback: %s", exc)
 
     terms = {w.lower().strip("?.,") for w in question.split() if len(w) > 3}
     sentences = [snippet.strip() for snippet in context.split(". ") if snippet.strip()]

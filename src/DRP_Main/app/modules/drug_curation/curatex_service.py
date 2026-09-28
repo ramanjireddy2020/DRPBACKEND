@@ -31,6 +31,7 @@ from DRP_Main.app.modules.drug_curation import (
 )
 from DRP_Main.app.modules.drug_curation.criteria_config import (
     DAILYMED_CRITERIA,
+    normalize_weight_table,
     validate_weight_table,
 )
 from DRP_Main.app.modules.drug_curation.identifier_service import (
@@ -136,6 +137,15 @@ class CurateXService:
             return self._await_target_confirmation(disease, candidate_targets, session_id), []
 
         if weights:
+
+            # The profile screen edits rows rendered from `label`, so it sends
+
+            # labels back rather than keys. Re-key before validating, and before
+
+            # anything downstream reads the table.
+
+            weights = normalize_weight_table(weights)
+
             problems = validate_weight_table(weights)
             if problems:
                 raise CurateXError("; ".join(problems))
@@ -239,6 +249,10 @@ class CurateXService:
             evidence_top_n or getattr(settings, "CURATEX_EVIDENCE_TOP_N", 10) or 10
         )
         if weights:
+            # The profile screen edits rows rendered from `label`, so it sends
+            # labels back rather than keys. Re-key before validating, and before
+            # anything downstream reads the table.
+            weights = normalize_weight_table(weights)
             problems = validate_weight_table(weights)
             if problems:
                 raise CurateXError("; ".join(problems))

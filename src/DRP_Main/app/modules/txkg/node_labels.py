@@ -35,16 +35,19 @@ from DRP_Main.app.modules.txkg.kegg_pathways import KEGG_PATHWAY_NAMES
 _KEGG_RE = re.compile(r"^hsa\d{5}$")
 _REACTOME_RE = re.compile(r"^R-[A-Z]{3}-\d+$")
 _GO_RE = re.compile(r"^GO:\d{7}$")
+#: OMIM entries arrive either bare ("187950") or prefixed ("OMIM:187950").
+_OMIM_RE = re.compile(r"^(?:OMIM:)?(\d{6})$")
 
 #: An annotation label the graph applied on top of an accession, e.g.
 #: "GO BP: GO:0005102" or "Pathway: R-HSA-76009". The accession inside is what
 #: can actually be resolved.
 _PREFIXED_RE = re.compile(
-    r"^(?:GO (?:BP|MF|CC)|Pathway|Complex|Tissue|Cell|MeSH group)\s*:\s*(\S+)$"
+    r"^(?:GO (?:BP|MF|CC)|Pathway|Complex|Tissue|Cell|MeSH group|OMIM)\s*:\s*(\S+)$"
 )
 
 _REACTOME_API = "https://reactome.org/ContentService/data/query/"
 _GO_API = "https://api.geneontology.org/api/ontology/term/"
+_NCBI_ESUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 _TIMEOUT = 5.0
 
 #: Reactome answers 403 to urllib's default agent, so every lookup identifies
@@ -71,6 +74,7 @@ def _lookup(accession: str) -> str:
         return _cache[accession]
 
     name = ""
+    omim = _OMIM_RE.match(accession)
     if _KEGG_RE.match(accession):
         name = KEGG_PATHWAY_NAMES.get(accession, "")
     elif _REACTOME_RE.match(accession):
@@ -79,9 +83,35 @@ def _lookup(accession: str) -> str:
     elif _GO_RE.match(accession):
         body = _fetch_json(_GO_API + accession.replace(":", "%3A"))
         name = (body or {}).get("label") or ""
+    elif omim:
+        name = _omim_title(omim.group(1))
 
     _cache[accession] = name
     return name
+
+
+def _omim_title(number: str) -> str:
+    """
+    An OMIM entry's title, via NCBI esummary.
+
+    OMIM's own API needs a registered key; esummary does not, and returns the
+    same title. OMIM writes titles as "THROMBOCYTHEMIA 1; THCYT1" — the part
+    after the semicolon is the gene/phenotype symbol, which is noise on a graph
+    node — and in block capitals, which reads as shouting next to "Thrombopoietin
+    receptor". Both are tidied.
+    """
+    body = _fetch_json(_NCBI_ESUMMARY + f"?db=omim&id={number}&retmode=json")
+    result = (body or {}).get("result") or {}
+    for key, entry in result.items():
+        if key == "uids" or not isinstance(entry, dict):
+            continue
+        title = str(entry.get("title") or "").strip()
+        if not title:
+            continue
+        title = title.split(";")[0].strip()
+        # Left alone if it is already mixed case — only OMIM's all-caps needs it.
+        return title.title() if title.isupper() else title
+    return ""
 
 
 def looks_unresolved(node_id: str, name: Optional[str]) -> bool:

@@ -39,6 +39,58 @@ class LLMClient:
             self._gemini_client = genai.Client(api_key=settings.GOOGLE_API_KEY)
             logger.info("Gemini client initialized")
 
+    def chat(self, messages: List[Dict[str, str]], **kwargs) -> str:
+        """
+        Ask whichever provider this deployment actually has, in preference order.
+
+        Databricks Model Serving first — it is the platform's own, and keeps the
+        request inside the workspace. Then Groq, then Gemini.
+
+        The fallback exists because `databricks()` alone is gated on *both*
+        DATABRICKS_HOST and DATABRICKS_TOKEN, and the deployed app sets only the
+        host. Callers that asked for Databricks directly got an exception, caught
+        it, and quietly degraded: article chat returned the abstract's opening
+        sentences to every question, and every LLM-written line on the platform
+        fell back to templated text — a 200 response that looked like a broken
+        feature rather than a missing credential.
+
+        Raises only when no provider is configured at all, so a caller can still
+        tell "nothing to ask" from "the answer was unhelpful".
+        """
+        errors: List[str] = []
+
+        if settings.DATABRICKS_HOST and settings.DATABRICKS_TOKEN:
+            try:
+                return self.databricks(messages, **kwargs)
+            except Exception as exc:  # noqa: BLE001 — try the next provider
+                errors.append(f"databricks: {exc}")
+
+        if self._groq_client:
+            try:
+                # Groq rejects the serving-endpoint-only arguments.
+                allowed = {k: v for k, v in kwargs.items()
+                           if k in ("temperature", "max_tokens", "top_p", "stop")}
+                return self.groq(messages, **allowed)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"groq: {exc}")
+
+        if self._gemini_client:
+            try:
+                # Gemini takes one prompt, so the turns are flattened. System
+                # content leads, which is how it is weighted anyway.
+                prompt = "\n\n".join(
+                    str(m.get("content", "")) for m in messages if m.get("content")
+                )
+                return self.gemini(prompt)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"gemini: {exc}")
+
+        raise RuntimeError(
+            "No LLM provider available — "
+            + ("; ".join(errors) if errors
+               else "set DATABRICKS_TOKEN, GROQ_API_KEY or GOOGLE_API_KEY")
+        )
+
     def groq(self, messages: List[Any], model: Optional[str] = None, **kwargs) -> str:
         """Query Groq LLM."""
         if not self._groq_client:

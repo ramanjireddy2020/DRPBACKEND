@@ -184,15 +184,31 @@ def explicit_module_request(message: str) -> Optional[str]:
     return None
 
 
+#: Words that are instruction, not subject. Whatever survives removing these and
+#: the target is what the query is actually about.
+_INSTRUCTION_WORDS = {
+    "a", "an", "the", "of", "for", "in", "on", "with", "to", "and", "or", "me",
+    "my", "please", "create", "build", "generate", "make", "produce", "run",
+    "start", "perform", "do", "find", "check", "search", "assess", "analyse",
+    "analyze", "evaluate", "get", "show", "identify", "list", "give",
+    "drug", "target", "targets", "protein", "proteins", "compound", "compounds",
+    "candidate", "candidates", "profile", "literature", "novelty", "patent",
+    "patents", "knowledge", "graph", "subgraph", "pathway", "pathways",
+    "associated", "repurposing", "repurpose", "about", "related",
+    "ideal", "best", "good", "new", "dock", "docking", "screen", "screening",
+    "mine", "mining", "review", "study", "combination", "combo",
+}
+
 #: Words that appear in a docking request but never name a compound. Small-molecule
 #: drug names are lower-case and unremarkable in shape, so there is no pattern to
 #: match on — the reliable signal is what is left after the instruction is removed.
-_NOT_A_COMPOUND = {
-    "a", "an", "and", "the", "of", "for", "in", "on", "with", "to", "or", "by",
-    "against", "between", "combination", "combo", "compound", "compounds", "drug",
-    "drugs", "dock", "docking", "screen", "screening", "run", "start", "perform",
-    "do", "please", "against", "binding", "affinity", "library", "this", "that",
-    "these", "those", "my", "me", "target", "protein", "using", "use", "via",
+#: Shares `_INSTRUCTION_WORDS` rather than keeping a second list: the two drifted,
+#: and "find targets for thrombocytosis" reached PubChem as the compounds "find"
+#: and "targets" because this copy was missing both.
+_NOT_A_COMPOUND = _INSTRUCTION_WORDS | {
+    "against", "between", "binding", "affinity", "library", "this", "that",
+    "these", "those", "using", "via", "from", "into", "onto", "out", "over",
+    "please", "also", "then", "next", "some", "any", "all", "both",
 }
 
 
@@ -256,20 +272,6 @@ def _selected_target(selections: Dict[str, Any]) -> str:
     return ""
 
 
-#: Words that are instruction, not subject. Whatever survives removing these and
-#: the target is what the query is actually about.
-_INSTRUCTION_WORDS = {
-    "a", "an", "the", "of", "for", "in", "on", "with", "to", "and", "or", "me",
-    "my", "please", "create", "build", "generate", "make", "produce", "run",
-    "start", "perform", "do", "find", "check", "search", "assess", "analyse",
-    "analyze", "evaluate", "get", "show", "identify", "list", "give",
-    "drug", "target", "targets", "protein", "proteins", "compound", "compounds",
-    "candidate", "candidates", "profile", "literature", "novelty", "patent",
-    "patents", "knowledge", "graph", "subgraph", "pathway", "pathways",
-    "associated", "repurposing", "repurpose", "about", "related",
-    "ideal", "best", "good", "new", "dock", "docking", "screen", "screening",
-    "mine", "mining", "review", "study", "combination", "combo",
-}
 
 
 def _disease_from_query(query: str, target: str) -> str:

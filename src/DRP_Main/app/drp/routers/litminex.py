@@ -191,7 +191,7 @@ def _article_insights(db: Session, rows: list, query: str) -> list:
         try:
             from DRP_Main.app.core.llm import llm_client
 
-            reply = llm_client.databricks(
+            reply = llm_client.chat(
                 messages=[
                     {
                         "role": "system",

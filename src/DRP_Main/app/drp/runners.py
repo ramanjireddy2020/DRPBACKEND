@@ -543,6 +543,35 @@ def _source_links(sources: Sequence[str], uniprot: str, gene: str,
     return out
 
 
+#: "'jak2' matches several structures — resend with one identifier. Candidates:
+#: 7F7W (JAK2-JH2), 8C09 (Crystal structure of JAK2 JH2-I559F), ..."
+_AMBIGUOUS_RE = re.compile(r"matches several structures.*?Candidates:\s*(.+)$", re.S)
+_CANDIDATE_RE = re.compile(r"\b([0-9][A-Za-z0-9]{3})\s*\(([^)]*)\)")
+
+
+def _structure_choices(failures: Sequence[str]) -> List[Dict[str, str]]:
+    """
+    PDB entries offered by an ambiguous-structure failure, as `{id, title}`.
+
+    Parsed from the message rather than plumbed through as data because the
+    resolution step runs inside the Databricks job and only its status string
+    crosses back.
+    """
+    out: List[Dict[str, str]] = []
+    seen = set()
+    for failure in failures or []:
+        match = _AMBIGUOUS_RE.search(str(failure))
+        if not match:
+            continue
+        for pdb_id, title in _CANDIDATE_RE.findall(match.group(1)):
+            key = pdb_id.upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"id": key, "title": title.strip()})
+    return out
+
+
 async def _run_txkg_on_databricks(params: Dict[str, Any], ctx: JobContext) -> Dict[str, Any]:
     """
     Run TxKG as a Databricks job and rebuild the contract response from Gold.
@@ -1590,6 +1619,25 @@ async def _run_screensuite_on_databricks(params: Dict[str, Any], ctx: JobContext
 
     if not ranked:
         reason = "; ".join(failures) or "the job wrote no results"
+        # An ambiguous structure is a question, not a failure. The resolution
+        # step deliberately stops before spending compute and hands back a
+        # shortlist — docking the wrong JAK2 domain is far more expensive than
+        # one round trip — but the runner was turning that into a failed job, so
+        # the researcher saw a red error instead of the choice they were being
+        # asked to make. Mirrors CurateX's `awaiting_target_confirmation`.
+        candidates = _structure_choices(failures)
+        if candidates:
+            return {
+                "stage": "awaiting_structure_confirmation",
+                "target": target,
+                "structureChoices": candidates,
+                "hits": [],
+                "totalHits": 0,
+                "summary": (
+                    f"'{target}' matches {len(candidates)} structures. "
+                    "Choose one to screen against."
+                ),
+            }
         raise RunnerError(f"Screening produced no hits for '{target}'. {reason}")
 
     ranked.sort(key=lambda r: gold.as_float(r, "affinity_kcal_mol", 0.0) or 0.0)

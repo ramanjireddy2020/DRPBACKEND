@@ -1776,7 +1776,7 @@ user's question, so any preamble reads as filler."""
         # through to the factual summary below.
         from DRP_Main.app.core.llm import llm_client
 
-        return llm_client.databricks(
+        return llm_client.chat(
             messages=[
                 {
                     "role": "system",
