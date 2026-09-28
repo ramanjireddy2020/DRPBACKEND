@@ -36,7 +36,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import numpy as np
 
 from DRP_Main.app.api.v1.endpoints import txkg_test as kg
-from DRP_Main.app.modules.txkg.kegg_pathways import KEGG_PATHWAY_NAMES
+from DRP_Main.app.modules.txkg.node_labels import resolve as resolve_label
 
 # --------------------------------------------------------------------------------------
 # Configuration
@@ -211,58 +211,19 @@ def node_type(node_id: str) -> str:
     return kg.id_to_type.get(node_id, "other")
 
 
-#: GO term labels, resolved once each and cached for the process. Unlike KEGG's
-#: 372 human pathways these are too many to bundle, and only the handful that
-#: appear on a path are ever needed. A miss is cached as well as a hit so an
-#: unreachable API costs one attempt per term, not one per render.
-_GO_NAMES: Dict[str, str] = {}
-_GO_API = "https://api.geneontology.org/api/ontology/term/"
-
-
-def _go_label(term: str) -> str:
-    """The GO term's label, or "" when it cannot be resolved."""
-    if term in _GO_NAMES:
-        return _GO_NAMES[term]
-    label = ""
-    try:
-        import json as _json
-        import urllib.request
-
-        request = urllib.request.Request(
-            _GO_API + term.replace(":", "%3A"), headers={"Accept": "application/json"}
-        )
-        with urllib.request.urlopen(request, timeout=5) as response:
-            label = (_json.loads(response.read().decode()) or {}).get("label") or ""
-    except Exception:  # noqa: BLE001 — degrade to the accession
-        label = ""
-    _GO_NAMES[term] = label
-    return label
-
-
 def node_name(node_id: str) -> str:
-    """Display name of any node, annotation nodes included."""
+    """
+    Display name of any node, annotation nodes included.
+
+    BioKG names proteins, drugs and diseases but leaves pathway and ontology
+    nodes as accessions, and its own lookup falls back to the accession rather
+    than to nothing — so "already has a name" cannot be tested by truthiness.
+    `node_labels.resolve` makes that judgement and fills the gaps.
+    """
     name = kg.id_to_name.get(node_id)
     if name is not None and name != node_id:
         return name
-
-    annotated = _ANNOT_NAME.get(node_id)
-    if annotated and annotated != node_id:
-        return annotated
-
-    # Accession-shaped ids the graph has no name for.
-    kegg = KEGG_PATHWAY_NAMES.get(node_id)
-    if kegg:
-        return kegg
-    match = _GO_ID_RE.search(node_id)
-    if match:
-        label = _go_label(match.group(0))
-        if label:
-            return label
-
-    return annotated or name or node_id
-
-
-_GO_ID_RE = re.compile(r"GO:\d{7}")
+    return resolve_label(node_id, _ANNOT_NAME.get(node_id) or name)
 
 
 def _annotation_signature() -> str:

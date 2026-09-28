@@ -175,10 +175,19 @@ def _sync_session(db: OrmSession, session: DrpSession) -> DrpSession:
         if session.status != "Saved":
             if all(st.status == "Completed" for st in session.steps):
                 session.status = "Completed"
-            elif any(st.status == "Failed" for st in session.steps) and latest.status == "Failed":
-                session.status = "In Progress"
+            elif latest.status == "Failed":
+                # A failed run is finished, not ongoing. Reporting it as "In
+                # Progress" left dead sessions sitting at the top of the list
+                # looking like work still running.
+                session.status = "Completed"
             else:
                 session.status = "In Progress"
+    elif not session.steps:
+        # A session that never started a step — the researcher's input was not
+        # understood and they were asked what they meant. Nothing is running, so
+        # it should not claim to be.
+        if session.status != "Saved":
+            session.status = "Completed"
 
     if dirty:
         session.updated_at = utcnow()
@@ -664,30 +673,25 @@ def _module_menu() -> str:
         f"{lines}\n\n"
         "Never name a module outside this list — not even a plausible-sounding one, "
         "and never a database or website as though it were a module. If one of these "
-        "would answer the question, name it exactly as written above and say the "
-        "researcher can start it by typing @<module> with their request. If none of "
-        "them would, say so plainly and stop; do not invent a destination."
+        "would answer the question, name it exactly as written above and say it can "
+        "be started by typing @<module> with the request. If none of them would, say "
+        "so plainly and stop; do not invent a destination.\n\n"
+        "Write to the person asking, as \"you\". They are reading this in a chat they "
+        "are part of, so \"the researcher can...\" reads as if they were being "
+        "discussed rather than answered."
     )
 
 
-def _answer_follow_up(db: OrmSession, step: Optional[DrpSessionStep], question: str) -> str:
-    """
-    Answer a follow-up from the step's own results rather than re-running it.
-
-    Grounding the answer in the result already on hand is both faster and more
-    truthful than a fresh agent run: the researcher is asking about what is on
-    screen. Degrades to a plain message when no LLM is configured, so chat never
-    hard-fails a session.
-    """
-    if step is None or not step.job_id:
-        return "Ask me about the results once a module has finished running."
-
+def _step_context(db: OrmSession, step: DrpSessionStep) -> Optional[Dict[str, Any]]:
+    """One completed step's results, trimmed to what an answer can use."""
+    if not step.job_id:
+        return None
     job = db.query(DrpJob).filter(DrpJob.id == step.job_id).first()
     if job is None or job.status != "completed":
-        return "That step is still running — I'll be able to answer once it finishes."
+        return None
 
     result = job.result or {}
-    context = {
+    context: Dict[str, Any] = {
         "module": step.module,
         "summary": result.get("summary", ""),
         "interpretation": result.get("interpretation", ""),
@@ -699,6 +703,43 @@ def _answer_follow_up(db: OrmSession, step: Optional[DrpSessionStep], question: 
         if isinstance(result.get(key), list) and result[key]:
             context[key] = result[key][:10]
             break
+    return context
+
+
+def _answer_follow_up(db: OrmSession, step: Optional[DrpSessionStep], question: str) -> str:
+    """
+    Answer a follow-up from the branch's results rather than re-running anything.
+
+    Every completed step on the current branch is in scope, not just the newest.
+    "Why is JAK2 ranked higher?" was answered from the LitMineX step alone — "the
+    results do not provide a specific explanation" — while the TxKG step two
+    positions back held the ranking and the reason for it. A researcher asking
+    about a session means the session, not whichever module happens to be on
+    screen. Oldest first, so the newest results are nearest the question.
+
+    Degrades to a plain message when no LLM is configured, so chat never
+    hard-fails a session.
+    """
+    if step is None or not step.job_id:
+        return "Ask me about the results once a module has finished running."
+
+    job = db.query(DrpJob).filter(DrpJob.id == step.job_id).first()
+    if job is None or job.status != "completed":
+        return "That step is still running — I'll be able to answer once it finishes."
+
+    session = step.session
+    branch = _branch_of(step)
+    earlier = [
+        st for st in (session.steps if session is not None else [])
+        if _branch_of(st) == branch and st.id != step.id
+    ]
+    history = [ctx for ctx in (_step_context(db, st) for st in earlier) if ctx]
+
+    current = _step_context(db, step) or {"module": step.module}
+    context: Dict[str, Any] = dict(current)
+    if history:
+        # Capped: a five-module session would otherwise send every result set.
+        context["earlierSteps"] = history[-4:]
 
     try:
         import json
@@ -710,9 +751,12 @@ def _answer_follow_up(db: OrmSession, step: Optional[DrpSessionStep], question: 
                 {
                     "role": "system",
                     "content": (
-                        f"You are the DRP {step.module} agent. Answer the researcher's "
-                        "question from the results provided wherever they cover it, and "
-                        "say which result you are drawing on.\n\n"
+                        f"You are the DRP {step.module} agent. Answer the question "
+                        "from the results provided wherever they cover it, and say "
+                        "which result you are drawing on. `earlierSteps` holds "
+                        "results from earlier modules in this same session — use "
+                        "them: a question about a ranking is usually answered by "
+                        "the step that produced the ranking, not the newest one.\n\n"
                         "If the results do not cover it but the question is general "
                         "biomedical background — what a gene, protein, pathway or "
                         "disease is — answer it from your own knowledge in a sentence "

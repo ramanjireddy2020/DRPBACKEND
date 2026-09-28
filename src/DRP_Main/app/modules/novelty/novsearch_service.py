@@ -153,7 +153,11 @@ async def run_novsearch(
     emit = progress or (lambda _msg: None)
     normalized = normalize_input(payload)
 
-    emit(f"Searching USPTO PatentsView for '{normalized.query}'...")
+    # Names the corpus actually searched. The label said USPTO PatentsView long
+    # after retrieval moved — first to SerpAPI, now to Europe PMC's SureChEMBL
+    # patent set — and a progress line naming the wrong source sends anyone
+    # debugging a thin result set to the wrong place.
+    emit(f"Searching patents (Europe PMC / SureChEMBL) for '{normalized.query}'...")
     candidates = await query_cache.get(normalized.query, num_results)
     if not candidates:
         raise AmbiguousQueryError(

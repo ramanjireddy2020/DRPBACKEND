@@ -256,6 +256,55 @@ def _selected_target(selections: Dict[str, Any]) -> str:
     return ""
 
 
+#: Words that are instruction, not subject. Whatever survives removing these and
+#: the target is what the query is actually about.
+_INSTRUCTION_WORDS = {
+    "a", "an", "the", "of", "for", "in", "on", "with", "to", "and", "or", "me",
+    "my", "please", "create", "build", "generate", "make", "produce", "run",
+    "start", "perform", "do", "find", "check", "search", "assess", "analyse",
+    "analyze", "evaluate", "get", "show", "identify", "list", "give",
+    "drug", "target", "targets", "protein", "proteins", "compound", "compounds",
+    "candidate", "candidates", "profile", "literature", "novelty", "patent",
+    "patents", "knowledge", "graph", "subgraph", "pathway", "pathways",
+    "associated", "repurposing", "repurpose", "about", "related",
+    "ideal", "best", "good", "new", "dock", "docking", "screen", "screening",
+    "mine", "mining", "review", "study", "combination", "combo",
+}
+
+
+def _disease_from_query(query: str, target: str) -> str:
+    """
+    The disease a session's own query is about, or "".
+
+    A TxKG-led session opens with "find protein targets for thrombocytosis", and
+    what is left after removing the instruction is the disease. Stop-phrase
+    stripping alone is not enough to decide this: it matches known phrasings, so
+    "create a drug profile for JAK2" came through as the disease "create a drug
+    profile". Removing instruction words and the target, and requiring something
+    meaningful to survive, rejects that without needing every phrasing listed.
+    """
+    target_lower = (target or "").strip().lower()
+    left, right = split_target_disease(query)
+
+    for part in (right, left):
+        candidate = (part or "").strip()
+        if not candidate or candidate.lower() == target_lower:
+            continue
+
+        words = [w for w in re.split(r"[^\w\-]+", candidate) if w]
+        kept = [
+            w for w in words
+            if w.lower() not in _INSTRUCTION_WORDS and w.lower() != target_lower
+        ]
+        if not kept:
+            continue
+        # A bare gene symbol is a target, not a disease.
+        if len(kept) == 1 and extract_gene_symbol(kept[0]) == kept[0]:
+            continue
+        return " ".join(kept)
+    return ""
+
+
 def split_target_disease(query: str) -> Tuple[str, str]:
     """Split 'HER2 in Breast Cancer' / 'HER2 for Breast Cancer' into its parts."""
     cleaned = _strip_query_noise(query)
@@ -292,19 +341,35 @@ def build_params(
         }
 
     if module == "LitMineX":
-        # Targets ticked on the TxKG step are the whole point of the hand-off;
-        # fall back to the query subject only when nothing was selected.
-        target_ids = selections.get("targetIds") or ([subject] if subject else [])
+        # Targets ticked on the TxKG step are the whole point of the hand-off.
+        # Failing that, the gene symbol in the message: "search literature for
+        # jak2" left `subject` as "search jak2" — noise-stripping removes the
+        # phrase "literature for" but not the verb — and PubMed found nothing
+        # for it, so a routed run returned 0 articles where the picker returned
+        # 20. Only when neither exists does the leftover phrase stand in, which
+        # is what a disease-led query ("literature on thrombocytosis") needs.
+        chosen_ids = selections.get("targetIds")
+        if not chosen_ids:
+            symbol = extract_gene_symbol(query)
+            chosen_ids = [symbol] if symbol else ([subject] if subject else [])
         return {
             "query": query or selections.get("query", ""),
-            "targetIds": target_ids,
+            "targetIds": chosen_ids,
             "maxResults": int(selections.get("maxResults", 20)),
         }
 
     if module == "CurateX":
+        target = chosen or resolve_target(query, subject)
         return {
-            "target": chosen or resolve_target(query, subject),
-            "disease": selections.get("disease"),
+            "target": target,
+            # Without a disease the repurposing exclusion filter has nothing to
+            # exclude against and reports itself inactive — which is what
+            # happened on every "Continue to CurateX": the hand-off sends only
+            # targetIds, so `disease` was None even though the session had been
+            # about thrombocytosis since its first message. The session's own
+            # query still carries it, so it is derived rather than demanded of
+            # the caller.
+            "disease": selections.get("disease") or _disease_from_query(query, target),
             "numResults": int(selections.get("numResults", 20)),
             # The researcher's edited scoring weights, set on the CurateX profile screen.
             "weights": selections.get("weights"),
