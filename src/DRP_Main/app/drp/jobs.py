@@ -241,17 +241,12 @@ def require_completed(db: Session, job_id: str, user_id: int) -> DrpJob:
     if job.status == "failed":
         raise HTTPException(status_code=409, detail=job.error or "Job failed")
     if job.status != "completed":
-        # Worded for a researcher, not a developer: the UI has been surfacing this
-        # verbatim when it requests results before polling, and "poll
-        # /agents/jobs/... /status" reads like a crash. The jobId is returned as a
-        # field so a client can act on it without parsing the sentence.
+        # Worded for a researcher, not a developer: the UI surfaces this verbatim
+        # when it requests results before polling, and "poll /agents/jobs/.../status"
+        # reads like a crash. `detail` stays a **string** — every other error on this
+        # API is one, and a client doing `detail` expecting text breaks on an object.
         raise HTTPException(
             status_code=409,
-            detail={
-                "message": "This step is still running. Results appear once it finishes.",
-                "status": job.status,
-                "jobId": job_id,
-                "pollUrl": f"/v1/agents/jobs/{job_id}/status",
-            },
+            detail="This step is still running. Results will appear once it finishes.",
         )
     return job

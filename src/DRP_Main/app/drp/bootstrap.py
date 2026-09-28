@@ -62,6 +62,10 @@ def _ensure_step_columns() -> None:
     additions = (
         ("drp_session_messages", "step_id", "VARCHAR"),
         ("drp_jobs", "session_step_id", "VARCHAR"),
+        # Scopes an article's chat thread to one research session. Without it,
+        # reopening the same paper in new work replayed the previous session's
+        # conversation.
+        ("drp_article_chat_messages", "session_id", "VARCHAR"),
     )
     inspector = inspect(engine)
     for table, column, sql_type in additions:

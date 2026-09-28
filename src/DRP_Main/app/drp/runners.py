@@ -1394,7 +1394,7 @@ async def run_curatex_compounds(params: Dict[str, Any], ctx: JobContext) -> Dict
     if not target:
         raise RunnerError("target is required — CurateX profiles a target's known ligands")
 
-    ctx.progress(f"Building the drug profile for {target}...")
+    ctx.progress(f"Building the ideal candidate profile for {target}...")
     try:
         result = await asyncio.to_thread(
             CurateXService().run,

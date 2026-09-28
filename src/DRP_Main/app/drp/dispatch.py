@@ -106,18 +106,33 @@ def resolve_target(query: str, subject: str) -> str:
 #: "what about the patents on these?" is a question about the current results, not
 #: a request to run NovSearch. So a match needs an action verb *and* that module's
 #: object, which a question phrased as a question will not satisfy.
-_ACTION = r"(?:create|build|generate|make|produce|run|start|perform|do)"
+#: Verbs that begin an instruction. "find" and "check" were missing, so "find the
+#: novelty of the combination jak2 and imatinib" — a direct request to run
+#: NovSearch — was answered out of the CurateX results instead of starting it.
+_ACTION = (r"(?:create|build|generate|make|produce|run|start|perform|do|find|"
+           r"check|search|assess|analyse|analyze|evaluate|get|show)")
+
+#: Verbs that are themselves the instruction: "dock jak2 and imatinib" names the
+#: module's work in one word, with no separate object to match against.
+_BARE_VERB_INTENTS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^\s*dock(?:ing)?\b", re.I), "ScreenSuite"),
+    (re.compile(r"^\s*screen(?:ing)?\b", re.I), "ScreenSuite"),
+    (re.compile(r"^\s*curate\b", re.I), "CurateX"),
+]
 
 _MODULE_INTENTS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(rf"\b{_ACTION}\b[^.?!]*\b(?:drug|target|compound|candidate)\s+profile\b", re.I),
      "CurateX"),
     (re.compile(rf"\b{_ACTION}\b[^.?!]*\bcurat(?:e|ion)\b", re.I), "CurateX"),
-    (re.compile(rf"\b{_ACTION}\b[^.?!]*\b(?:novelty|freedom[- ]to[- ]operate|fto|prior art)\b", re.I),
+    (re.compile(rf"\b{_ACTION}\b[^.?!]*\b(?:novelty|novel|freedom[- ]to[- ]operate|fto|prior art|patent)\b", re.I),
      "NovSearch"),
-    (re.compile(rf"\b{_ACTION}\b[^.?!]*\b(?:dock(?:ing)?|screen(?:ing)?)\b", re.I), "ScreenSuite"),
-    (re.compile(rf"\b{_ACTION}\b[^.?!]*\b(?:literature|pubmed)\s*(?:search|mining|review)?\b", re.I),
+    (re.compile(rf"\b{_ACTION}\b[^.?!]*\b(?:dock(?:ing)?|screen(?:ing)?|binding affinity)\b", re.I),
+     "ScreenSuite"),
+    (re.compile(rf"\b{_ACTION}\b[^.?!]*\b(?:literature|pubmed|papers?|publications?)\b", re.I),
      "LitMineX"),
     (re.compile(rf"\b{_ACTION}\b[^.?!]*\b(?:knowledge graph|subgraph)\b", re.I), "TxKG"),
+    (re.compile(rf"\b{_ACTION}\b[^.?!]*\b(?:protein )?targets?\s+(?:for|associated with)\b", re.I),
+     "TxKG"),
 ]
 
 
@@ -132,10 +147,53 @@ def explicit_module_request(message: str) -> Optional[str]:
     text = (message or "").strip()
     if not text:
         return None
+    # A question is a question however it opens: "do these dock?" is not an
+    # instruction to run ScreenSuite, so anything ending in "?" is left alone.
+    if text.endswith("?"):
+        return None
+    for pattern, module in _BARE_VERB_INTENTS:
+        if pattern.search(text):
+            return module
     for pattern, module in _MODULE_INTENTS:
         if pattern.search(text):
             return module
     return None
+
+
+def _selected_target(selections: Dict[str, Any]) -> str:
+    """
+    The single target a step hand-off chose, under any of the keys the UI sends.
+
+    The spec's hand-off payload is `{"targetIds": [...]}` — that is the example on
+    `POST /sessions/{id}/steps` and what LitMineX already reads. CurateX and
+    ScreenSuite only looked for a singular `target`, found nothing, and fell back
+    to parsing the *original composer query*, which on a TxKG-led session is still
+    "find protein targets for thrombocytosis". So "Continue to CurateX" after
+    picking JAK2 profiled thrombocytosis instead: the researcher's explicit choice
+    was discarded in favour of a phrase from a question they asked three steps ago.
+
+    Takes the first id when several are ticked — CurateX and ScreenSuite each act
+    on one target at a time.
+    """
+    single = selections.get("target")
+    if isinstance(single, str) and single.strip():
+        return single.strip()
+
+    for key in ("targetIds", "targets", "selectedTargets"):
+        value = selections.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, (list, tuple)):
+            for entry in value:
+                if isinstance(entry, str) and entry.strip():
+                    return entry.strip()
+                # Rows are sometimes sent whole rather than as bare ids.
+                if isinstance(entry, dict):
+                    for field in ("target", "uniprotId", "geneName", "name", "id"):
+                        candidate = entry.get(field)
+                        if isinstance(candidate, str) and candidate.strip():
+                            return candidate.strip()
+    return ""
 
 
 def split_target_disease(query: str) -> Tuple[str, str]:
@@ -164,6 +222,7 @@ def build_params(
     """
     selections = selections or {}
     subject = _strip_query_noise(_MODULE_MENTION.sub("", query or "")).strip()
+    chosen = _selected_target(selections)
 
     if module == "TxKG":
         return {
@@ -184,7 +243,7 @@ def build_params(
 
     if module == "CurateX":
         return {
-            "target": selections.get("target") or resolve_target(query, subject),
+            "target": chosen or resolve_target(query, subject),
             "disease": selections.get("disease"),
             "numResults": int(selections.get("numResults", 20)),
             # The researcher's edited scoring weights, set on the CurateX profile screen.
@@ -193,7 +252,7 @@ def build_params(
 
     if module == "ScreenSuite":
         return {
-            "target": selections.get("target") or resolve_target(query, subject),
+            "target": chosen or resolve_target(query, subject),
             "compoundLibrary": selections.get("compoundLibrary"),
             # CurateX's "View in ScreenSuite" sends the chosen compounds here.
             "compounds": selections.get("compounds") or [],
@@ -214,7 +273,7 @@ def build_params(
     if module == "NovSearch":
         target, disease = split_target_disease(query)
         return {
-            "target": selections.get("target") or target,
+            "target": chosen or target,
             "disease": selections.get("disease") or disease,
             "drug": selections.get("drug"),
             # Present on a ScreenSuite carry-over so the report ties back to the
@@ -225,6 +284,28 @@ def build_params(
         }
 
     return {"query": query}
+
+
+def _curatex_stage(kind: str, params: Dict[str, Any]) -> str:
+    """
+    Which CurateX job a request wants: build the profile, or score against it.
+
+    CurateX is two steps by design — build an editable profile, let the
+    researcher adjust it, then score candidates against what they approved. The
+    module→job map points at `curatex.compounds`, which does both at once, so a
+    conversational start ("create a drug profile for JAK2") skipped straight to a
+    ranked list. The researcher then saw "20 candidates ranked" *before* being
+    offered a profile to edit, and the profile screen had nothing pending to
+    submit — the edit step existed but nothing ever routed through it.
+
+    Weights or values present mean the researcher has already edited a profile
+    and this is the scoring pass; their absence means they are still at the start.
+    """
+    if kind != "curatex.compounds":
+        return kind
+    if params.get("weights") or params.get("values"):
+        return kind
+    return "curatex.target_profile"
 
 
 def start_module_job(
@@ -252,6 +333,7 @@ def start_module_job(
     params = build_params(module, query, selections)
     if params_override:
         params.update(params_override)
+    kind = _curatex_stage(kind, params)
     job = create_job(
         db,
         user_id=user_id,

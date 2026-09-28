@@ -243,6 +243,12 @@ class DrpArticleChatMessage(Base):
     id = Column(String, primary_key=True)
     article_id = Column(String, ForeignKey("drp_articles.id"), index=True)
     user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    # Which research session the turn belongs to. Without it the thread was keyed
+    # on (article, user) alone, so opening the same paper in a new session showed
+    # the previous session's conversation — the article is the same object, the
+    # line of enquiry is not. Nullable: turns written before this column existed
+    # have no session, and are treated as belonging to none.
+    session_id = Column(String, index=True, nullable=True)
     role = Column(String, default="user")  # user | agent
     content = Column(Text, default="")
     citations = Column(JSON, default=list)

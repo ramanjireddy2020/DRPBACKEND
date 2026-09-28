@@ -1,7 +1,8 @@
 """Articles — /articles/{articleId}[/pmc-link|/save|/chat|/chat/history]."""
 import uuid
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from DRP_Main.app.core.config import settings
@@ -132,6 +133,7 @@ def chat_with_article(
             id=str(uuid.uuid4()),
             article_id=article.id,
             user_id=user.id,
+            session_id=body.sessionId,
             role="user",
             content=body.message,
         )
@@ -148,6 +150,7 @@ def chat_with_article(
             id=str(uuid.uuid4()),
             article_id=article.id,
             user_id=user.id,
+            session_id=body.sessionId,
             role="agent",
             content=answer,
             citations=citations,
@@ -212,19 +215,26 @@ def _answer_from_article(article: DrpArticle, question: str) -> str:
 
 @router.get("/articles/{articleId}/chat/history", response_model=list[s.ChatMessage], tags=[TAG])
 def chat_history(
-    articleId: str, user: User = Depends(current_user), db: Session = Depends(get_db)
+    articleId: str,
+    sessionId: Optional[str] = Query(
+        None,
+        description="Scope the thread to one research session. Omit to get every "
+                    "turn on this article, which is the pre-session behaviour.",
+    ),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
 ):
-    """Get the chat history for an article thread."""
+    """Get the chat history for an article thread, within a session."""
     _get_article(db, articleId)
-    rows = (
-        db.query(DrpArticleChatMessage)
-        .filter(
-            DrpArticleChatMessage.article_id == articleId,
-            DrpArticleChatMessage.user_id == user.id,
-        )
-        .order_by(DrpArticleChatMessage.created_at)
-        .all()
+    query = db.query(DrpArticleChatMessage).filter(
+        DrpArticleChatMessage.article_id == articleId,
+        DrpArticleChatMessage.user_id == user.id,
     )
+    if sessionId:
+        # Only this session's turns. Rows written before the column existed have
+        # no session and are correctly left out of a session-scoped thread.
+        query = query.filter(DrpArticleChatMessage.session_id == sessionId)
+    rows = query.order_by(DrpArticleChatMessage.created_at).all()
     return [
         s.ChatMessage(role=row.role, content=row.content or "", citations=row.citations or [])
         for row in rows

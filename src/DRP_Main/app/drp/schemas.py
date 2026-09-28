@@ -443,6 +443,11 @@ class ExternalLink(_Wire):
 
 class ChatRequest(_Wire):
     message: str = Field(..., examples=["How does it modulate JAK2 signaling?"])
+    # Which research session the question is asked from. Optional for backward
+    # compatibility, but send it: without it the article's thread is shared across
+    # every session, so reopening the same paper in new work shows the old
+    # conversation. `GET .../chat/history?sessionId=` filters by the same value.
+    sessionId: Optional[str] = None
 
 
 class ChatMessage(_Wire):

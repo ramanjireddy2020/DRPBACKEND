@@ -491,13 +491,21 @@ def post_message(
     from DRP_Main.app.drp.dispatch import explicit_module_request, extract_module_mention
 
     mentioned = extract_module_mention(body.message) or explicit_module_request(body.message)
-    if mentioned and (step is None or mentioned != step.module):
+    # A request to run a module starts it even when that module is the current
+    # step. The previous `mentioned != step.module` guard meant a second
+    # "create a drug profile for JAK2" was answered out of the first run's
+    # results — the one module you could never re-run was the one you were
+    # looking at, and re-running with a different target is the normal way to
+    # use CurateX. The earlier step and its results stay in the chain, so the
+    # conversation keeps both.
+    if mentioned:
+        carried = _carry_forward(step, body.message)
         new_step = _create_step(
             db,
             session,
             module=mentioned,
             query=body.message,
-            selections=(step.selections or {}) if step else {},
+            selections=carried,
             parent_step_id=step.id if step else None,
         )
         db.flush()
@@ -509,7 +517,7 @@ def post_message(
             session_id=session.id,
             project_id=session.project_id,
             session_step_id=new_step.id,
-            selections=(step.selections or {}) if step else {},
+            selections=carried,
         )
         new_step.job_id = job.id
         session.module = mentioned
@@ -535,6 +543,26 @@ def post_message(
         stepId=step.id if step else None,
         jobId=None,
     )
+
+
+def _carry_forward(step: Optional[DrpSessionStep], message: str) -> Dict[str, Any]:
+    """
+    The previous step's selections, minus any target the new message overrides.
+
+    Selections normally carry a researcher's ticked choice forward, and that is
+    right for a hand-off. But a message that names its own target is a *new*
+    instruction: "create a drug profile for STAT3" after a JAK2 run must profile
+    STAT3. Left alone, the carried target would win and the module would re-run
+    on JAK2 — re-running with a different target being the main reason to ask
+    twice in the first place.
+    """
+    from DRP_Main.app.drp.dispatch import extract_gene_symbol
+
+    carried = dict((step.selections or {}) if step else {})
+    if extract_gene_symbol(message):
+        for key in ("target", "targetIds", "targets", "selectedTargets"):
+            carried.pop(key, None)
+    return carried
 
 
 def _module_menu() -> str:

@@ -97,6 +97,11 @@ class ResolvedStructure:
 _target_cache: Dict[str, ResolvedTarget] = {}
 _cache_lock = threading.Lock()
 
+#: UniProtKB accession format, per UniProt's own specification.
+_ACCESSION_RE = re.compile(
+    r"^(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})$"
+)
+
 
 def resolve_target(name_or_symbol: str) -> ResolvedTarget:
     """
@@ -118,13 +123,22 @@ def resolve_target(name_or_symbol: str) -> ResolvedTarget:
     if cached:
         return cached
 
+    # A UniProt accession is looked up as an accession. TxKG identifies targets by
+    # accession, so "Continue to CurateX" hands one over — and `gene:"O60674"`
+    # matches nothing, failing with "use the gene symbol" for an identifier that
+    # is already the most precise one there is.
+    if _ACCESSION_RE.match(query):
+        search = f'accession:{query} AND organism_id:9606 AND reviewed:true'
+    else:
+        # Gene-name match first; UniProt falls back to full-text within the
+        # same query syntax when the symbol is really a protein name.
+        search = (f'(gene:"{query}" OR protein_name:"{query}") '
+                  f"AND organism_id:9606 AND reviewed:true")
+
     payload = get_json(
         UNIPROT_SEARCH,
         {
-            # Gene-name match first; UniProt falls back to full-text within the
-            # same query syntax when the symbol is really a protein name.
-            "query": f'(gene:"{query}" OR protein_name:"{query}") '
-                     f"AND organism_id:9606 AND reviewed:true",
+            "query": search,
             "fields": "accession,id,protein_name,gene_names,xref_chembl,xref_ensembl",
             "format": "json",
             "size": 5,
