@@ -66,6 +66,10 @@ def _ensure_step_columns() -> None:
         # reopening the same paper in new work replayed the previous session's
         # conversation.
         ("drp_article_chat_messages", "session_id", "VARCHAR"),
+        # Which branch the researcher is on. Without it the newest step anywhere
+        # in the session was treated as current, so main and a branch answered
+        # from each other's results.
+        ("drp_sessions", "active_branch", "VARCHAR"),
     )
     inspector = inspect(engine)
     for table, column, sql_type in additions:

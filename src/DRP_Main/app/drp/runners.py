@@ -345,10 +345,17 @@ def _spec_node_type(raw_type: str, is_disease_hub: bool) -> str:
 
 def _to_spec_graph(subgraph: Dict[str, Any]) -> Dict[str, Any]:
     """Convert a txkg subgraph payload into the spec's nodes/edges/legend shape."""
+    # `id` stays the accession — it is the node's identity and the edges key on
+    # it — but `label` is what the graph draws, so a KEGG id there showed
+    # "hsa04630" on a node where "JAK-STAT signaling pathway" belongs.
+    from DRP_Main.app.modules.txkg.kegg_pathways import KEGG_PATHWAY_NAMES
+
     nodes = [
         {
             "id": node["id"],
-            "label": node.get("name") or node["id"],
+            "label": (node.get("name")
+                      or KEGG_PATHWAY_NAMES.get(node["id"])
+                      or node["id"]),
             "type": _spec_node_type(node.get("type", ""), bool(node.get("is_disease"))),
         }
         for node in subgraph.get("nodes", [])

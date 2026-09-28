@@ -151,6 +151,11 @@ class Session(_Wire):
     steps: List[SessionStep] = Field(default_factory=list)
     jobId: Optional[str] = None
     currentStepId: Optional[str] = None
+    # The branch the session is currently on; "" is main. `jobId`,
+    # `currentStepId`, `module` and `summary` all describe this branch, not the
+    # newest step in the session — those differ once the chain forks. Each
+    # step's own `branchName` says which branch it belongs to.
+    activeBranch: str = ""
 
 
 class SessionArtifact(_Wire):
@@ -190,6 +195,11 @@ class RerunStepRequest(_Wire):
 class SessionMessageRequest(_Wire):
     message: str = Field(..., examples=["Why is JAK2 ranked lower than DPP4?"])
     stepId: Optional[str] = None
+    # Which branch the researcher is looking at; "" is main. Send it whenever the
+    # branch switcher changes, so a question asked on main is answered from
+    # main's results rather than from whichever branch ran most recently.
+    # Omitting it leaves the session on the branch it was already on.
+    branchName: Optional[str] = None
 
 
 class SessionMessageResponse(_Wire):

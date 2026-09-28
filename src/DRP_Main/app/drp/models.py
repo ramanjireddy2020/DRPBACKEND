@@ -107,6 +107,12 @@ class DrpSession(Base):
     query = Column(Text, default="")
     project_id = Column(String, ForeignKey("drp_projects.id"), nullable=True)
     is_draft = Column(Boolean, default=False)
+    # Which branch the researcher is looking at. "" is main. A session's steps
+    # are one list across every branch, so without this the newest step anywhere
+    # was treated as the current one: a follow-up on main picked up a branch's
+    # results, and a branch replayed main's. Named rather than an id so a branch
+    # survives being extended.
+    active_branch = Column(String, default="", nullable=True)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 

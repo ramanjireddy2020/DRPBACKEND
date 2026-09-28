@@ -36,6 +36,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import numpy as np
 
 from DRP_Main.app.api.v1.endpoints import txkg_test as kg
+from DRP_Main.app.modules.txkg.kegg_pathways import KEGG_PATHWAY_NAMES
 
 # --------------------------------------------------------------------------------------
 # Configuration
@@ -210,12 +211,58 @@ def node_type(node_id: str) -> str:
     return kg.id_to_type.get(node_id, "other")
 
 
+#: GO term labels, resolved once each and cached for the process. Unlike KEGG's
+#: 372 human pathways these are too many to bundle, and only the handful that
+#: appear on a path are ever needed. A miss is cached as well as a hit so an
+#: unreachable API costs one attempt per term, not one per render.
+_GO_NAMES: Dict[str, str] = {}
+_GO_API = "https://api.geneontology.org/api/ontology/term/"
+
+
+def _go_label(term: str) -> str:
+    """The GO term's label, or "" when it cannot be resolved."""
+    if term in _GO_NAMES:
+        return _GO_NAMES[term]
+    label = ""
+    try:
+        import json as _json
+        import urllib.request
+
+        request = urllib.request.Request(
+            _GO_API + term.replace(":", "%3A"), headers={"Accept": "application/json"}
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            label = (_json.loads(response.read().decode()) or {}).get("label") or ""
+    except Exception:  # noqa: BLE001 — degrade to the accession
+        label = ""
+    _GO_NAMES[term] = label
+    return label
+
+
 def node_name(node_id: str) -> str:
     """Display name of any node, annotation nodes included."""
     name = kg.id_to_name.get(node_id)
     if name is not None and name != node_id:
         return name
-    return _ANNOT_NAME.get(node_id, name or node_id)
+
+    annotated = _ANNOT_NAME.get(node_id)
+    if annotated and annotated != node_id:
+        return annotated
+
+    # Accession-shaped ids the graph has no name for.
+    kegg = KEGG_PATHWAY_NAMES.get(node_id)
+    if kegg:
+        return kegg
+    match = _GO_ID_RE.search(node_id)
+    if match:
+        label = _go_label(match.group(0))
+        if label:
+            return label
+
+    return annotated or name or node_id
+
+
+_GO_ID_RE = re.compile(r"GO:\d{7}")
 
 
 def _annotation_signature() -> str:
@@ -1777,7 +1824,11 @@ user's question, so any preamble reads as filler."""
                 },
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=900,
+            # 2-3 sentences per target across the whole finalized set. At 900 the
+            # reply ran out mid-sentence and the UI showed the cut — a paragraph
+            # ending on a bare "Tumor" with nothing after it. Budgeted per target
+            # with a floor, so adding targets cannot silently truncate again.
+            max_tokens=max(900, 220 * len(candidates)),
             temperature=0.4,
         )
 
@@ -1811,7 +1862,27 @@ _PREAMBLE_RE = re.compile(
 
 def _strip_preamble(text: str) -> str:
     """Drop a leading 'Here are the explanations...:' line from an interpretation."""
-    return _PREAMBLE_RE.sub("", text or "", count=1).lstrip()
+    return _trim_to_sentence(_PREAMBLE_RE.sub("", text or "", count=1).lstrip())
+
+
+def _trim_to_sentence(text: str) -> str:
+    """
+    Drop a trailing half-sentence left by the model hitting its token ceiling.
+
+    The budget above should prevent this, but a long enough run can still reach
+    the cap, and a paragraph cut mid-clause reads as a data error rather than a
+    length limit. Trimming back to the last complete sentence loses the fragment
+    and nothing else. A short reply is left alone — there is nothing to trim back
+    to, and returning "" would be worse than returning the fragment.
+    """
+    cleaned = (text or "").rstrip()
+    if not cleaned or cleaned[-1] in ".!?:":
+        return cleaned
+    cut = max(cleaned.rfind(". "), cleaned.rfind(".\n"),
+              cleaned.rfind("! "), cleaned.rfind("? "))
+    if cut == -1 or cut < len(cleaned) * 0.5:
+        return cleaned
+    return cleaned[: cut + 1]
 
 
 # --------------------------------------------------------------------------------------

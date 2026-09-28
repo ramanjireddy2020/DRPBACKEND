@@ -48,8 +48,17 @@ def extract_module_mention(query: str) -> Optional[str]:
     return None
 
 
-def infer_module(query: str, explicit: Optional[str] = None) -> str:
-    """Resolve the module for a query: explicit > @mention > keywords > TxKG."""
+def infer_module(query: str, explicit: Optional[str] = None) -> Optional[str]:
+    """
+    Resolve the module for a query: explicit > @mention > keywords > None.
+
+    Returns None when nothing matches, rather than falling back to TxKG. The
+    fallback turned every unrecognised input into a disease query: "open
+    report.pdf" ran TxKG, whose fuzzy resolver matched it to "Bone Resorption"
+    and propagated a knowledge graph for it. Two loose steps in a row produced a
+    confident answer to a question nobody asked. The caller decides what to do
+    with None — `POST /sessions` asks the researcher what they meant.
+    """
     resolved = canonical_module(explicit)
     if resolved in JOB_KIND_BY_MODULE:
         return resolved
@@ -60,7 +69,7 @@ def infer_module(query: str, explicit: Optional[str] = None) -> str:
     for keywords, module in _INTENT_RULES:
         if any(keyword in lowered for keyword in keywords):
             return module
-    return "TxKG"
+    return None
 
 
 #: Gene symbols are written in caps with an optional digit — JAK2, EGFR, TP53,
@@ -77,15 +86,30 @@ _NOT_A_GENE = {
 }
 
 
+#: A symbol written in lower case — "jak2", "stat3". Researchers type these as
+#: often as they type JAK2, and requiring capitals meant "dock jak2 with
+#: imatinib" resolved no target at all: the whole sentence was sent to UniProt as
+#: the target and "jak2" was left to be read as a compound. A trailing digit is
+#: what separates a symbol from an ordinary word here — "dock" and "imatinib"
+#: have none, so neither is mistaken for a gene.
+_GENE_SYMBOL_LOWER = re.compile(r"\b[A-Za-z]{2,8}\d{1,3}[A-Za-z]?\b")
+
+
 def extract_gene_symbol(query: str) -> str:
     """
     Pull a gene symbol out of a free-text instruction, or return "".
 
-    Case matters: only the original casing distinguishes a symbol from an ordinary
-    word, so this runs on the raw query rather than the lower-cased one.
+    An all-capitals token wins: casing is the strongest signal a word is a symbol
+    rather than prose. Failing that, a token carrying a digit is taken as one, so
+    a lower-case "jak2" still resolves. A word with neither — "dock", "imatinib",
+    "profile" — is never treated as a gene.
     """
-    for token in _GENE_SYMBOL.findall(query or ""):
+    text = query or ""
+    for token in _GENE_SYMBOL.findall(text):
         if token not in _NOT_A_GENE:
+            return token
+    for token in _GENE_SYMBOL_LOWER.findall(text):
+        if token.upper() not in _NOT_A_GENE:
             return token
     return ""
 
@@ -158,6 +182,42 @@ def explicit_module_request(message: str) -> Optional[str]:
         if pattern.search(text):
             return module
     return None
+
+
+#: Words that appear in a docking request but never name a compound. Small-molecule
+#: drug names are lower-case and unremarkable in shape, so there is no pattern to
+#: match on — the reliable signal is what is left after the instruction is removed.
+_NOT_A_COMPOUND = {
+    "a", "an", "and", "the", "of", "for", "in", "on", "with", "to", "or", "by",
+    "against", "between", "combination", "combo", "compound", "compounds", "drug",
+    "drugs", "dock", "docking", "screen", "screening", "run", "start", "perform",
+    "do", "please", "against", "binding", "affinity", "library", "this", "that",
+    "these", "those", "my", "me", "target", "protein", "using", "use", "via",
+}
+
+
+def compounds_from_text(query: str, target: str = "") -> list[dict]:
+    """
+    Compound names read out of a docking instruction, as the runner's payload.
+
+    Returns `[{"drug_name": ...}]` — the shape ScreenSuite's error message itself
+    documents. The target is excluded so "dock jak2 with imatinib" does not also
+    try to screen JAK2 against itself, and gene symbols are excluded because a
+    compound is not one.
+    """
+    text = _MODULE_MENTION.sub("", query or "")
+    target_lower = (target or "").strip().lower()
+    out, seen = [], set()
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9\-]{3,}", text):
+        low = token.lower()
+        if low in _NOT_A_COMPOUND or low in seen or low == target_lower:
+            continue
+        # A gene symbol is a target, not something to dock.
+        if token.isupper() or extract_gene_symbol(token):
+            continue
+        seen.add(low)
+        out.append({"drug_name": token})
+    return out
 
 
 def _selected_target(selections: Dict[str, Any]) -> str:
@@ -251,11 +311,17 @@ def build_params(
         }
 
     if module == "ScreenSuite":
+        target = chosen or resolve_target(query, subject)
         return {
-            "target": chosen or resolve_target(query, subject),
+            "target": target,
             "compoundLibrary": selections.get("compoundLibrary"),
             # CurateX's "View in ScreenSuite" sends the chosen compounds here.
-            "compounds": selections.get("compounds") or [],
+            # Falling back to the message text is what makes "dock jak2 with
+            # imatinib" work: before, compounds came only from selections, so a
+            # conversational request sent an empty list and the runner answered
+            # "Name at least one compound to screen" with imatinib right there
+            # in the sentence.
+            "compounds": selections.get("compounds") or compounds_from_text(query, target),
         }
 
     if module == "SaaS Pipeline":

@@ -86,8 +86,43 @@ def _create_step(
     return step
 
 
-def _latest_step(session: DrpSession) -> Optional[DrpSessionStep]:
-    return session.steps[-1] if session.steps else None
+def _branch_of(step: Optional[DrpSessionStep]) -> str:
+    """A step's branch. "" is main."""
+    return (step.branch_name or "") if step is not None else ""
+
+
+def _latest_step(
+    session: DrpSession, branch: Optional[str] = None
+) -> Optional[DrpSessionStep]:
+    """
+    The newest step on one branch — the session's active branch by default.
+
+    `session.steps` is a single list across every branch, so returning its last
+    entry made the newest step *anywhere* the current one. After branching, a
+    follow-up on main was answered from the branch's results and a branch
+    replayed main's; CurateX re-used main's profile on a branch for the same
+    reason. Scoping by branch is what keeps the two apart.
+
+    Falls back to the whole chain when the named branch has no steps yet, so a
+    branch created but not yet run still answers from where it forked.
+    """
+    if not session.steps:
+        return None
+    wanted = session.active_branch or "" if branch is None else (branch or "")
+    on_branch = [st for st in session.steps if _branch_of(st) == wanted]
+    if on_branch:
+        return on_branch[-1]
+    # A branch with no steps of its own inherits the step it forked from.
+    return session.steps[-1] if not wanted else _forked_from(session, wanted)
+
+
+def _forked_from(session: DrpSession, branch: str) -> Optional[DrpSessionStep]:
+    """The step a branch forked from, for a branch that has not run yet."""
+    by_id = {st.id: st for st in session.steps}
+    for step in session.steps:
+        if _branch_of(step) == branch and step.parent_step_id:
+            return by_id.get(step.parent_step_id)
+    return None
 
 
 def _sync_step(db: OrmSession, step: DrpSessionStep) -> DrpSessionStep:
@@ -189,6 +224,7 @@ def _to_wire(session: DrpSession) -> s.Session:
         steps=[_step_to_wire(st) for st in session.steps],
         jobId=latest.job_id if latest else None,
         currentStepId=latest.id if latest else None,
+        activeBranch=session.active_branch or "",
     )
 
 
@@ -280,7 +316,7 @@ def create_session(
     session = DrpSession(
         id=f"ses_{uuid.uuid4().hex[:16]}",
         user_id=user.id,
-        module=module,
+        module=module or "",
         title=(body.query or "").strip()[:120],
         status="In Progress",
         summary="",
@@ -290,6 +326,19 @@ def create_session(
     )
     db.add(session)
     db.flush()  # session.id must exist before the step and message reference it
+
+    if module is None:
+        # Nothing in the query names a module or reads as one of their jobs.
+        # Guessing here is worse than asking: the old fallback sent "open
+        # report.pdf" to TxKG, which fuzzy-matched it to "Bone Resorption" and
+        # propagated a knowledge graph for a disease the researcher never named.
+        # The session is kept so the reply lands in a thread they can answer in.
+        _add_message(db, session.id, "user", body.query)
+        _add_message(db, session.id, "agent", _clarify_message(), "DRP Supervisor")
+        session.status = "In Progress"
+        db.commit()
+        db.refresh(session)
+        return _to_wire(session)
 
     step = _create_step(db, session, module=module, query=body.query)
     db.flush()
@@ -352,6 +401,11 @@ def create_step(
                 status_code=404, detail=f"Step '{body.fromStepId}' not found in this session"
             )
 
+    # An explicit branchName forks; otherwise the step continues whichever branch
+    # its parent is on. Inheriting matters as much as forking: without it every
+    # hand-off after a branch silently landed back on main.
+    branch = body.branchName or _branch_of(parent)
+
     query = body.query or session.query or ""
     step = _create_step(
         db,
@@ -360,9 +414,10 @@ def create_step(
         query=query,
         selections=body.selections,
         parent_step_id=parent.id if parent else None,
-        branch_name=body.branchName,
+        branch_name=branch,
     )
     db.flush()
+    session.active_branch = branch
 
     try:
         job = start_module_job(
@@ -474,11 +529,18 @@ def post_message(
     session = _owned_session(db, sessionId, user)
     _sync_session(db, session)
 
+    # `branchName` says which branch the researcher is looking at; `stepId` names
+    # a step directly and implies its branch. Either one switches the session's
+    # active branch, so switching back to main in the UI answers from main.
+    if body.branchName is not None:
+        session.active_branch = body.branchName or ""
+
     step = _latest_step(session)
     if body.stepId:
         step = next((st for st in session.steps if st.id == body.stepId), None)
         if step is None:
             raise HTTPException(status_code=404, detail=f"Step '{body.stepId}' not found")
+        session.active_branch = _branch_of(step)
 
     _add_message(db, session.id, "user", body.message, step_id=step.id if step else None)
     db.commit()
@@ -507,6 +569,9 @@ def post_message(
             query=body.message,
             selections=carried,
             parent_step_id=step.id if step else None,
+            # Stay on the branch the researcher is on — a run started from a
+            # branch belongs to it, not to main.
+            branch_name=_branch_of(step),
         )
         db.flush()
         job = start_module_job(
@@ -563,6 +628,24 @@ def _carry_forward(step: Optional[DrpSessionStep], message: str) -> Dict[str, An
         for key in ("target", "targetIds", "targets", "selectedTargets"):
             carried.pop(key, None)
     return carried
+
+
+def _clarify_message() -> str:
+    """
+    Asked when a query names no module and reads as none of their jobs.
+
+    Names the modules rather than saying "I don't understand": a researcher who
+    has just been told their input was not recognised needs to know what the
+    platform can actually do, not to guess again.
+    """
+    lines = "\n".join(f"  • {m.key} — {m.description}" for m in MODULES)
+    return (
+        "I'm not sure what you'd like me to run. Here is what I can do:\n\n"
+        f"{lines}\n\n"
+        "Tell me the disease or target you're interested in — for example "
+        '"find protein targets for thrombocytosis" — or start a module directly '
+        "by typing @ and its name."
+    )
 
 
 def _module_menu() -> str:
