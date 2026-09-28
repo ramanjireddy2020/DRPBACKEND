@@ -197,6 +197,16 @@ _INSTRUCTION_WORDS = {
     "associated", "repurposing", "repurpose", "about", "related",
     "ideal", "best", "good", "new", "dock", "docking", "screen", "screening",
     "mine", "mining", "review", "study", "combination", "combo",
+    # Question forms. "is there prior art for ruxolitinib in thrombocytosis?"
+    # reached NovSearch with the target "is there prior art for ruxolitinib",
+    # because a question is phrased around the subject rather than naming it.
+    # Only ever stripped from the edges of a phrase, so a gene that happens to
+    # share a spelling is safe anywhere a gene actually appears.
+    "is", "are", "was", "were", "be", "been", "can", "could", "would", "should",
+    "what", "which", "who", "whom", "whose", "when", "where", "why", "how",
+    "does", "did", "has", "have", "had", "there", "here", "it", "its",
+    "prior", "art", "freedom", "operate", "fto", "tell", "explain", "describe",
+    "we", "us", "you", "your", "i",
 }
 
 #: Words that appear in a docking request but never name a compound. Small-molecule
@@ -316,15 +326,41 @@ def _disease_from_query(query: str, target: str) -> str:
     return ""
 
 
+def _drop_instruction_words(phrase: str) -> str:
+    """
+    Remove leading/trailing instruction words from a split half.
+
+    `_strip_query_noise` removes known noise *phrases*, not stray verbs, so
+    "find patents for ruxolitinib in thrombocytosis" survived it intact and then
+    split on " in " into ("find patents for ruxolitinib", "thrombocytosis").
+    NovSearch searched for the literal string "find patents for ruxolitinib" and
+    returned patents on methotrexate adjuvants and trabecular meshwork — nothing
+    to do with the request. Only the edges are trimmed: an interior word can be
+    part of a real name ("vitamin D receptor"), whereas a leading "find" or a
+    trailing "for" never is.
+    """
+    words = phrase.split()
+    while words and words[0].strip(",.").lower() in _INSTRUCTION_WORDS:
+        words.pop(0)
+    while words and words[-1].strip(",.").lower() in _INSTRUCTION_WORDS:
+        words.pop()
+    return " ".join(words).strip()
+
+
 def split_target_disease(query: str) -> Tuple[str, str]:
     """Split 'HER2 in Breast Cancer' / 'HER2 for Breast Cancer' into its parts."""
     cleaned = _strip_query_noise(query)
     for separator in (" in ", " for ", " against ", " — ", " - ", ","):
         if separator in cleaned:
             left, right = cleaned.split(separator, 1)
-            if left.strip() and right.strip():
-                return left.strip(), right.strip()
-    return cleaned, ""
+            left, right = _drop_instruction_words(left), _drop_instruction_words(right)
+            if left and right:
+                return left, right
+            # One side was pure instruction ("find patents for X"): the surviving
+            # side is the subject, not a target/disease pair.
+            if left or right:
+                return (left or right), ""
+    return _drop_instruction_words(cleaned), ""
 
 
 def build_params(
@@ -393,13 +429,19 @@ def build_params(
         # against "thrombocytosis". An empty target is better than a wrong one;
         # the runner says what is missing.
         target = chosen or extract_gene_symbol(query)
-        compounds = selections.get("compounds") or []
-        if not compounds and _asks_to_dock(query):
-            # Only parse ligands from a message that actually asks to dock.
-            # The session query carries forward unchanged, so a hand-off from
-            # "find protein targets for thrombocytosis" was reading the disease
-            # as a compound to screen.
-            compounds = compounds_from_text(query, target)
+        # Compounds named in *this* message outrank whatever was carried over.
+        # The other order screened the top CurateX candidate no matter what was
+        # asked for: "dock jak2 with ruxolitinib" arrived with the CurateX
+        # selection still attached, so it docked Omega-3-carboxylic acid and the
+        # explicitly named compound was dropped without a word. Naming a compound
+        # is the clearest statement of intent available, so it wins; the carried
+        # selection is the default for a hand-off that names none.
+        #
+        # Still gated on `_asks_to_dock`, because the session query carries
+        # forward unchanged and a hand-off from "find protein targets for
+        # thrombocytosis" would otherwise read the disease as a ligand.
+        named = compounds_from_text(query, target) if _asks_to_dock(query) else []
+        compounds = named or selections.get("compounds") or []
         return {
             "target": target,
             "compoundLibrary": selections.get("compoundLibrary"),

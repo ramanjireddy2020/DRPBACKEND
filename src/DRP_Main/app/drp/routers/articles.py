@@ -1,4 +1,5 @@
 """Articles — /articles/{articleId}[/pmc-link|/save|/chat|/chat/history]."""
+import re
 import uuid
 from typing import Optional
 
@@ -160,17 +161,68 @@ def chat_with_article(
     return s.ChatMessage(role="agent", content=answer, citations=citations)
 
 
+_PMCID = re.compile(r"(PMC\d+)", re.I)
+#: Europe PMC serves open-access full text as JATS XML, keyed by PMCID. Only
+#: open-access articles resolve; everything else 404s, which is the signal to
+#: fall back to the abstract.
+_EPMC_FULLTEXT = "https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML"
+_FULL_TEXT_CHARS = 60_000
+
+
+def _article_full_text(article: DrpArticle) -> tuple[str, str]:
+    """
+    The best available text for this article, and what it is.
+
+    Chat was answering from the abstract even when the article's own full text
+    was a request away, so "what does this article say about X" could only ever
+    be answered from ~250 words — and for anything in the methods or the results
+    the honest answer was always "the abstract does not cover that". The
+    open-access body is fetched from Europe PMC when the article has a PMCID.
+
+    Returns `(text, kind)` where kind is "full text" or "abstract", so the prompt
+    and the answer can be honest about which one was read. Failure is never
+    fatal: a timeout, a paywall or a missing PMCID all fall back to the abstract.
+    """
+    abstract = (article.abstract or article.preview or "").strip()
+
+    match = _PMCID.search(f"{article.pmc_link or ''} {article.pdf_url or ''}")
+    if not match:
+        return abstract, "abstract"
+
+    try:
+        import httpx
+
+        response = httpx.get(
+            _EPMC_FULLTEXT.format(pmcid=match.group(1).upper()),
+            timeout=12.0,
+            headers={"User-Agent": "InnoDD-API/1.0 (drug repurposing platform)"},
+        )
+        if response.status_code != 200 or not response.text.strip():
+            return abstract, "abstract"
+        # Strip JATS tags rather than parsing: the body text is what matters and
+        # a full XML parse would pull in references and float boxes as prose.
+        text = re.sub(r"<(ref-list|back|front)\b.*?</\1>", " ", response.text, flags=re.S | re.I)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) > len(abstract):
+            return text[:_FULL_TEXT_CHARS], "full text"
+    except Exception as exc:  # noqa: BLE001 — the abstract is always a usable source
+        logger.warning("full-text fetch failed for %s, using abstract: %s", article.id, exc)
+    return abstract, "abstract"
+
+
 def _answer_from_article(article: DrpArticle, question: str) -> str:
     """
-    Answer grounded in the article's abstract.
+    Answer grounded in the article's full text where it is open access, and in
+    its abstract otherwise.
 
     Uses the Databricks pay-per-token Foundation Model API when configured;
-    otherwise falls back to returning the most relevant abstract sentences so
-    the endpoint stays useful offline.
+    otherwise falls back to returning the most relevant sentences so the
+    endpoint stays useful offline.
     """
-    context = (article.abstract or article.preview or "").strip()
+    context, source_kind = _article_full_text(article)
     if not context:
-        return "This article has no abstract text stored, so I cannot answer from its content."
+        return "This article has no text stored, so I cannot answer from its content."
 
     # No provider gate: `llm_client.chat` tries Databricks, then Groq, then
     # Gemini, and raises only when none is configured. This used to be gated on
@@ -187,21 +239,22 @@ def _answer_from_article(article: DrpArticle, question: str) -> str:
                     "content": (
                         "You are a biomedical research assistant helping a researcher "
                         "read one paper. Answer their question about it.\n\n"
-                        "Use the abstract as your source wherever it covers the "
-                        "question, and quote or paraphrase what it actually says. "
-                        "Where the abstract does not cover it, say so in a clause — "
-                        "not as the whole answer — and then answer from general "
-                        "biomedical knowledge if you reliably can, making clear that "
-                        "part is background rather than from this paper. A plain "
-                        "question such as what a gene or a term means deserves a "
-                        "plain answer, not a refusal.\n\n"
+                        f"You have been given this paper's {source_kind}. Use it as "
+                        "your source wherever it covers the question, and quote or "
+                        "paraphrase what it actually says. Where it does not cover "
+                        "the question, say so in a clause — not as the whole answer "
+                        "— and then answer from general biomedical knowledge if you "
+                        "reliably can, making clear that part is background rather "
+                        "than from this paper. A plain question such as what a gene "
+                        "or a term means deserves a plain answer, not a refusal.\n\n"
                         "Never invent findings, numbers or citations and attribute "
                         "them to this paper. Address the reader as \"you\"."
                     ),
                 },
                 {
                     "role": "user",
-                    "content": f"Title: {article.title}\nAbstract: {context}\n\n"
+                    "content": f"Title: {article.title}\n"
+                    f"{source_kind.title()}: {context}\n\n"
                     f"Question: {question}",
                 },
             ],

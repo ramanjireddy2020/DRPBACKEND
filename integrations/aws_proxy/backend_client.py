@@ -93,6 +93,22 @@ class BackendError(RuntimeError):
         self.body = body
 
 
+class BinaryResponse:
+    """
+    A backend response that is not JSON — an export file, a generated report.
+
+    Carried rather than parsed, so the handler can base64-encode it and set the
+    real content type. Kept as a plain class (no dataclass) to avoid adding an
+    import to a Lambda that ships as a single zip.
+    """
+
+    __slots__ = ("content_type", "content")
+
+    def __init__(self, content_type: str, content: bytes):
+        self.content_type = content_type
+        self.content = content
+
+
 def _get_databricks_token() -> str:
     """Client-credentials token for the app's service principal, cached until near expiry."""
     now = time.time()
@@ -226,4 +242,21 @@ def call_backend(
     if resp.status_code >= 400:
         raise BackendError(resp.status_code, resp.text)
 
-    return resp.json() if resp.content else None
+    if not resp.content:
+        return None
+
+    # Not every endpoint answers with JSON. `GET /v1/exports/{id}/download`
+    # returns CSV, SVG or PDF, and parsing those as JSON raised
+    # "Expecting value: line 1 column 1", which the handler turned into
+    # `502 proxy_failure` — so every export except JSON, and every generated
+    # report, failed at the download step while the backend had produced the
+    # file correctly. The status code said nothing about what went wrong.
+    content_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if content_type in ("", "application/json") or content_type.endswith("+json"):
+        try:
+            return resp.json()
+        except ValueError:
+            # Declared JSON but is not: fall through and pass the bytes on rather
+            # than losing the response to a parse error.
+            pass
+    return BinaryResponse(content_type or "application/octet-stream", resp.content)

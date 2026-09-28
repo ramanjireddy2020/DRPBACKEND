@@ -116,6 +116,78 @@ def search_candidate_universe(
     return candidates
 
 
+#: Name fragments that mark an entity a small-molecule repurposing run cannot
+#: act on. Biologic stems are the WHO INN suffixes (-mab, -cept, -ase…), which
+#: are reserved and therefore reliable; the rest are the protein and vaccine
+#: words that appear verbatim in ChEMBL preferred names.
+_BIOLOGIC_MARKERS = (
+    "mab", "cept", "kinra", "ase", "tide",
+)
+_BIOLOGIC_WORDS = (
+    "immunoglobulin", "insulin", "interferon", "interleukin", "antibody",
+    "vaccine", "toxoid", "antigen", "albumin", "globulin", "peptide",
+    "erythropoietin", "somatropin", "factor viii", "factor ix", "heparin",
+    "enzyme", "protein", "conjugate", "peginterferon", "asparaginase",
+)
+
+
+def is_small_molecule(candidate: "Candidate") -> tuple[bool, str]:
+    """
+    Whether a candidate is a small molecule this pipeline can carry forward.
+
+    Two independent gates, and the reason is returned so an exclusion can be
+    explained rather than a drug just vanishing from the list:
+
+    * **No structure.** 218 of 592 entries on a JAK2 run had no SMILES at all —
+      research codes (XL-019, AT-9283) and protein entries. Without a structure
+      the drug-likeness criteria cannot be computed and ScreenSuite cannot dock
+      it, so it can never be acted on even if it ranks.
+    * **Biologic.** An antibody or an interferon may have a sequence but is not
+      a repurposing candidate here, and its molecular weight distorts every
+      physicochemical baseline it is included in.
+
+    Deliberately *not* a nutraceutical denylist: vitamins and fatty acids are
+    genuine small molecules with genuine structures, and excluding them by name
+    needs a list that has to be maintained forever. They are better handled by
+    the clinical-phase floor, which is already a setting.
+    """
+    if not (candidate.smiles or "").strip():
+        return False, "no defined chemical structure"
+
+    name = (candidate.name or "").strip().lower()
+    if any(word in name for word in _BIOLOGIC_WORDS):
+        return False, "biologic, not a small molecule"
+    last = name.replace("-", " ").split()[-1] if name.split() else ""
+    if any(last.endswith(stem) for stem in _BIOLOGIC_MARKERS) and len(last) > 5:
+        return False, "biologic, not a small molecule"
+
+    # A structure that large is a peptide or a conjugate whatever it is called.
+    weight = candidate.fields.get("molecular_weight")
+    try:
+        if weight is not None and float(weight) > 1200:
+            return False, "molecular weight above the small-molecule range"
+    except (TypeError, ValueError):
+        pass
+    return True, ""
+
+
+def apply_structure_filter(
+    candidates: Sequence["Candidate"],
+) -> tuple[List["Candidate"], List[Dict[str, Any]]]:
+    """Split the pool into small molecules and everything else, with reasons."""
+    kept: List["Candidate"] = []
+    removed: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        ok, reason = is_small_molecule(candidate)
+        if ok:
+            kept.append(candidate)
+        else:
+            removed.append(
+                {"chemblId": candidate.chembl_id, "name": candidate.name, "reason": reason}
+            )
+    return kept, removed
+
+
 # ── Step 2: exclusion filter ──────────────────────────────────────────────────
 def apply_exclusion_filter(
     candidates: Sequence[Candidate], exclusion: Dict[str, Any]
@@ -221,7 +293,12 @@ def match_and_score(
     if min_phase is None:
         min_phase = int(getattr(settings, "CURATEX_MIN_CLINICAL_PHASE", 1) or 1)
 
-    active_weights = dict(profile.weights)
+    # The renormalized table: criteria every ligand shares carry 0, and the rest
+    # total 100. Scoring on `profile.weights` instead spent 14 of every 100
+    # points on "not withdrawn" and "no withdrawal reason" — identical for all
+    # 324 ligands — which shrank the contribution of every criterion that could
+    # actually separate one candidate from another.
+    active_weights = dict(profile.effective_weights())
     if weights:
         active_weights.update({k: float(v) for k, v in weights.items() if k in active_weights})
 
@@ -235,6 +312,10 @@ def match_and_score(
                 profile.warnings.append(note)
 
     universe = search_candidate_universe(limit=limit, min_phase=min_phase)
+    # Structure gate first: a biologic or a bare research code cannot be docked
+    # or scored on drug-likeness, so it is not a candidate however it ranks, and
+    # dropping it before the exclusion lookup saves that lookup too.
+    universe, not_small_molecule = apply_structure_filter(universe)
     survivors, removed = apply_exclusion_filter(universe, profile.exclusion)
 
     # Pre-score on ChEMBL-only fields to decide what is worth enriching.
@@ -263,6 +344,11 @@ def match_and_score(
             f"max phase ≥ {min_phase}, not the whole of ChEMBL. Raise universeLimit to widen it."
         ),
         "excludedCount": len(removed),
+        # Reported separately from `excludedCount`: "already indicated" is a
+        # judgement about this disease, "not a small molecule" is a judgement
+        # about the entity, and conflating them hides which one dropped a drug.
+        "notSmallMoleculeCount": len(not_small_molecule),
+        "notSmallMolecule": not_small_molecule[:50],
         "scoredCount": len(survivors),
         "enrichedCount": sum(1 for c in shortlist if c.enriched),
         "enrichmentCap": len(shortlist),

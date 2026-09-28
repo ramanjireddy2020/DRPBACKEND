@@ -238,6 +238,65 @@ def _ot_disease_detail(efo_id: str) -> Optional[Dict[str, object]]:
     return (data or {}).get("disease")
 
 
+#: Ontology prefixes that denote a *disease*, in preference order. HP is
+#: deliberately absent — see `_ranked_disease_hits`.
+_DISEASE_ONTOLOGY_PREFIXES = ("EFO_", "MONDO_", "ORPHANET_", "DOID_", "NCIT_")
+
+
+def _ranked_disease_hits(
+    hits: List[Dict[str, object]], query: str
+) -> List[Dict[str, object]]:
+    """
+    Order Open Targets search hits so a disease term beats a phenotype term.
+
+    Open Targets indexes HPO phenotype terms alongside diseases, and for a term
+    that is both a finding and a condition the phenotype usually ranks first.
+    "thrombocytosis" resolved to HP_0001894 — a phenotypic abnormality, which has
+    no children in the disease ontology — so `efoDescendantCount` was 0 and the
+    already-indicated exclusion matched only drugs labelled for that one exact
+    term. Taking `hits[0]` blindly is what made that silent: the resolution
+    looked successful and the descendant expansion simply did nothing.
+
+    Sorted, not filtered: for a disease that genuinely only exists as an HPO
+    term, a phenotype hit is still better than failing to resolve at all.
+
+    Preferring a disease ontology is not on its own enough. Open Targets returns
+    "thrombocytosis" as, in order: the HPO phenotype, then *hereditary
+    thrombocytosis with transverse limb defect* — a named syndrome that happens
+    to sort first among the MONDO hits and has no descendants either. Taking the
+    first disease-ontology hit therefore swapped one wrong answer for a worse
+    one. What actually identifies the right term is the label: MONDO_0002249
+    "thrombocytosis disease" is the disease form of the query and carries the 5
+    subtypes the exclusion filter needs, and its label is the query plus the
+    word "disease". So name match comes first, ontology second, and a shorter
+    label breaks the remaining ties — every extra word is a narrowing qualifier.
+    """
+    lowered = (query or "").strip().lower()
+
+    def normalized(name: str) -> str:
+        # "thrombocytosis disease" and "thrombocytosis" name the same thing;
+        # MONDO appends the suffix to disambiguate from the phenotype term.
+        text = name.strip().lower()
+        for suffix in (" disease", " disorder", " syndrome"):
+            if text.endswith(suffix) and text != suffix.strip():
+                return text[: -len(suffix)].strip()
+        return text
+
+    def rank(hit: Dict[str, object]) -> tuple:
+        hit_id = str(hit.get("id", "")).upper()
+        name = str(hit.get("name", ""))
+        is_disease = any(hit_id.startswith(p) for p in _DISEASE_ONTOLOGY_PREFIXES)
+        # Lower sorts first.
+        return (
+            0 if normalized(name) == lowered else 1,
+            0 if is_disease else 1,
+            0 if lowered in name.strip().lower() else 1,
+            len(name.split()),
+        )
+
+    return sorted([h for h in hits if h.get("id")], key=rank)
+
+
 def _efo_from_mesh(mesh_id: str) -> Tuple[str, str, List[str]]:
     """
     Cross-walk a MeSH UI to EFO via Open Targets' own dbXRefs.
@@ -293,8 +352,8 @@ def resolve_disease(disease_name: str) -> ResolvedDisease:
     if not efo_id:
         data = post_graphql(OPEN_TARGETS_GRAPHQL, _OT_DISEASE_SEARCH, {"q": query})
         hits = (((data or {}).get("search") or {}).get("hits")) or []
-        if hits:
-            detail = _ot_disease_detail(hits[0].get("id", ""))
+        for hit in _ranked_disease_hits(hits, query):
+            detail = _ot_disease_detail(hit.get("id", ""))
             if detail:
                 efo_id = str(detail.get("id", ""))
                 efo_label = str(detail.get("name", ""))
@@ -306,6 +365,7 @@ def resolve_disease(disease_name: str) -> ResolvedDisease:
                             mesh_id = str(xref).split(":", 1)[1]
                             mesh_label = efo_label
                             break
+                break
 
     if not efo_id and not mesh_id:
         raise ResolutionError(

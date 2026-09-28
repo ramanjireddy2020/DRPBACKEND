@@ -343,7 +343,7 @@ def create_session(
         # propagated a knowledge graph for a disease the researcher never named.
         # The session is kept so the reply lands in a thread they can answer in.
         _add_message(db, session.id, "user", body.query)
-        _add_message(db, session.id, "agent", _clarify_message(), "DRP Supervisor")
+        _add_message(db, session.id, "agent", _answer_supervisor(body.query), "DRP Supervisor")
         session.status = "In Progress"
         db.commit()
         db.refresh(session)
@@ -657,6 +657,63 @@ def _clarify_message() -> str:
     )
 
 
+def _answer_supervisor(question: str) -> str:
+    """
+    Answer a home-screen message that starts no module.
+
+    `infer_module` returning None means "this is not a module job", not "this is
+    unintelligible" — but the only reply was the module menu, so "What is JAK2?"
+    was met with a list of agents. A researcher asking what a gene is wants the
+    answer; being handed a menu instead reads as the platform not understanding
+    a question a first-year student could field.
+
+    Three shapes arrive here and they need different replies:
+      * a general biomedical question ("What is JAK2?")     — answer it
+      * a bare disease or gene ("thrombocytosis")           — treat as the
+        research context they are setting, and offer the obvious next run
+      * anything else                                       — the menu
+
+    The same `_module_menu()` grounding as `_answer_follow_up` is used, so the
+    supervisor cannot invent a module while suggesting a next step. Falls back
+    to the menu whenever no LLM is reachable, so this never hard-fails a session.
+    """
+    try:
+        from DRP_Main.app.core.llm import llm_client
+
+        return llm_client.chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the DRP Supervisor on the home screen of a drug "
+                        "repurposing platform. The researcher's message did not "
+                        "start a module run. Reply in one of three ways.\n\n"
+                        "1. If it is a general biomedical question — what a gene, "
+                        "protein, pathway, disease or drug is, or how something "
+                        "works — just answer it from your own knowledge in two to "
+                        "four sentences. Do not mention modules, do not list the "
+                        "agents, and do not tell them to run anything. Answer the "
+                        "question.\n\n"
+                        "2. If it is a bare disease, gene or target name with no "
+                        "question, treat it as the research context they are "
+                        "setting. Say in one line what it is, then suggest the one "
+                        "module that would be the natural first step for it and how "
+                        "to start it. Do not list every module.\n\n"
+                        "3. Only if it is genuinely unclear what they want, say so "
+                        "briefly and list the modules.\n\n"
+                        "Never invent scores, citations, rankings or results — you "
+                        "have run nothing. Write to them as \"you\".\n\n"
+                        + _module_menu()
+                    ),
+                },
+                {"role": "user", "content": question},
+            ],
+            max_tokens=400,
+        )
+    except Exception:  # noqa: BLE001 — the menu is always a usable answer
+        return _clarify_message()
+
+
 def _module_menu() -> str:
     """
     The real module catalogue, for the follow-up prompt.
@@ -721,7 +778,10 @@ def _answer_follow_up(db: OrmSession, step: Optional[DrpSessionStep], question: 
     hard-fails a session.
     """
     if step is None or not step.job_id:
-        return "Ask me about the results once a module has finished running."
+        # No results to ground an answer in, but the question may not need any —
+        # a session opened with a general question then asked another one was
+        # told to wait for a module that was never going to run.
+        return _answer_supervisor(question)
 
     job = db.query(DrpJob).filter(DrpJob.id == step.job_id).first()
     if job is None or job.status != "completed":

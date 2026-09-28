@@ -40,6 +40,28 @@ class AmbiguousQueryError(ValueError):
     """
 
 
+def _fallback_terms(normalized: "NormalizedInput") -> List[str]:
+    """
+    Progressively broader single terms to retry an empty patent search with.
+
+    A drug is the most specific thing a patent is written about, so it is tried
+    first; a target second. The disease is deliberately last and only used alone
+    — patents indexed against a disease name alone are the least specific hits
+    the corpus can return, and promoting them above a drug match would answer a
+    question about ruxolitinib with patents about platelets.
+
+    Deduplicated, and the full query is never repeated — it already returned
+    nothing.
+    """
+    terms: List[str] = []
+    for value in (normalized.drug, normalized.target, normalized.disease):
+        text = (value or "").strip()
+        if text and text.lower() != (normalized.query or "").strip().lower():
+            if text not in terms:
+                terms.append(text)
+    return terms
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  §2 — input handling
 # ══════════════════════════════════════════════════════════════════════════════
@@ -159,6 +181,20 @@ async def run_novsearch(
     # debugging a thin result set to the wrong place.
     emit(f"Searching patents (Europe PMC / SureChEMBL) for '{normalized.query}'...")
     candidates = await query_cache.get(normalized.query, num_results)
+
+    if not candidates:
+        # Europe PMC ANDs the terms, so a precise two-part query can legitimately
+        # match nothing: "ruxolitinib thrombocytosis" has no SureChEMBL patent
+        # even though ruxolitinib has many. Returning "no patents found" for a
+        # drug that is heavily patented reads as a broken search, so widen once
+        # to the most specific single term before giving up, and say so — a
+        # broader result set the researcher knows is broader beats an empty one.
+        for term in _fallback_terms(normalized):
+            emit(f"No exact match; widening the search to '{term}'...")
+            candidates = await query_cache.get(term, num_results)
+            if candidates:
+                break
+
     if not candidates:
         raise AmbiguousQueryError(
             f"No patents found for '{normalized.query}'. Try a different search term."

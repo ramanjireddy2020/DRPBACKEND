@@ -15,10 +15,11 @@ references, not plain env vars — DATABRICKS_CLIENT_SECRET is a live credential
 """
 from __future__ import annotations
 
+import base64
 import json
 from typing import Any, Dict
 
-from backend_client import BackendError, call_backend
+from backend_client import BackendError, BinaryResponse, call_backend
 
 
 def _bearer_token(event: Dict[str, Any]) -> str | None:
@@ -77,6 +78,16 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         result = call_backend(
             method, path, json_body=body, params=params, user_token=user_token
         )
+        if isinstance(result, BinaryResponse):
+            # File downloads (CSV / SVG / PDF exports, generated reports). API
+            # Gateway needs the payload base64-encoded and flagged as such;
+            # returning the raw bytes as `body` corrupts anything non-UTF-8.
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": result.content_type},
+                "body": base64.b64encode(result.content).decode("ascii"),
+                "isBase64Encoded": True,
+            }
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},

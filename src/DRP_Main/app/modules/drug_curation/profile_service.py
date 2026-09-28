@@ -95,9 +95,65 @@ class DrugProfile:
     source_counts: Dict[str, int]
     warnings: List[str] = field(default_factory=list)
 
+    # ── weighting ────────────────────────────────────────────────────────────
+    def hidden_keys(self) -> Dict[str, str]:
+        """
+        Criteria that cannot affect the ranking, and why.
+
+        Two cases. A criterion every ligand shares (324/324 not withdrawn) adds
+        the same term to every composite — it cannot reorder anything, but it
+        still consumed 10 of the 100 available weight, so it diluted every
+        criterion that could. A criterion nothing has data for is worse: it
+        contributes nothing at all while still holding weight.
+
+        Returned rather than applied in place so the row survives in the payload,
+        flagged, instead of vanishing from an array the UI indexes into.
+        """
+        hidden: Dict[str, str] = {}
+        for key, baseline in self.baselines.items():
+            if baseline.count == 0:
+                hidden[key] = "No ligand had a value for this criterion."
+            elif not baseline.discriminating:
+                hidden[key] = (
+                    "Every ligand with data shares the same value, so this "
+                    "cannot separate one candidate from another."
+                )
+        return hidden
+
+    def effective_weights(self) -> Dict[str, float]:
+        """
+        The weights actually used for scoring: hidden criteria dropped, the rest
+        renormalized to total exactly 100 as whole numbers.
+
+        Largest-remainder apportionment, so the total is 100 on the nose rather
+        than 99 or 101 after rounding — the profile screen states the weights sum
+        to 100, and it should be true of the numbers that did the scoring.
+        """
+        hidden = self.hidden_keys()
+        live = {
+            key: float(weight)
+            for key, weight in self.weights.items()
+            if key not in hidden and float(weight) > 0
+        }
+        total = sum(live.values())
+        if not live or total <= 0:
+            return {key: float(w) for key, w in self.weights.items()}
+
+        scaled = {key: weight * 100.0 / total for key, weight in live.items()}
+        floored = {key: int(value) for key, value in scaled.items()}
+        shortfall = 100 - sum(floored.values())
+        # Hand the leftover points to the largest fractional parts first.
+        for key, _ in sorted(
+            scaled.items(), key=lambda kv: kv[1] - int(kv[1]), reverse=True
+        )[: max(0, shortfall)]:
+            floored[key] += 1
+        return {key: float(value) for key, value in floored.items()}
+
     # ── views ────────────────────────────────────────────────────────────────
     def criteria_rows(self) -> List[Dict[str, Any]]:
         """19 weighted rows + the exclusion row + the metadata row."""
+        hidden = self.hidden_keys()
+        effective = self.effective_weights()
         rows: List[Dict[str, Any]] = []
         for criterion in ALL_ROWS:
             baseline = self.baselines.get(criterion.key)
@@ -110,9 +166,26 @@ class DrugProfile:
                 "sources": list(criterion.sources),
                 "editable": criterion.editable,
                 "note": criterion.note,
-                "weight": float(self.weights.get(criterion.key, criterion.default_weight)),
+                # The renormalized weight — what actually scored this run. The
+                # profile screen offers these for editing, so showing the
+                # pre-normalization number would invite edits against a scale
+                # the backend no longer uses.
+                "weight": float(
+                    effective.get(
+                        criterion.key,
+                        self.weights.get(criterion.key, criterion.default_weight),
+                    )
+                ),
                 "defaultWeight": criterion.default_weight,
+                # Hidden rows stay in the array — the UI indexes into it — but
+                # carry zero weight and say why they were set aside.
+                "hidden": criterion.key in hidden,
+                "hiddenReason": hidden.get(criterion.key),
+                "discriminating": baseline.discriminating if baseline else None,
             }
+            if criterion.key in hidden:
+                row["weight"] = 0.0
+                row["editable"] = False
             if criterion.kind == EXCLUSION:
                 row.update(
                     {
@@ -135,14 +208,24 @@ class DrugProfile:
                         "median": baseline.median_value,
                         "min": baseline.minimum,
                         "max": baseline.maximum,
+                        # The representative band, and what scoring normalizes
+                        # against. Prefer it over min-max when displaying the
+                        # ideal range: min-max is one outlier wide.
+                        "p25": baseline.p25,
+                        "p75": baseline.p75,
                         "unit": criterion.unit,
                     }
                 )
             elif criterion.kind == CATEGORICAL and baseline:
                 row.update({"distribution": baseline.distribution})
 
-            if criterion.key in DAILYMED_CRITERIA and baseline:
-                # §4.3 — coverage is only meaningful where extraction can fail.
+            if baseline:
+                # Coverage on every criterion, not just the DailyMed-derived
+                # ones. ChEMBL's `oral` flag is 0 when a drug is simply not
+                # annotated, so the profile reported "no: 290, yes: 10" for a set
+                # of mostly-oral drugs with nothing to indicate that 290 meant
+                # "unknown". A criterion with no coverage figure reads as
+                # complete, which for this one was badly wrong.
                 row["coverage"] = baseline.coverage
                 row["coverageLabel"] = (
                     f"{baseline.count}/{baseline.total} ligands" if baseline.total else "no ligands"
@@ -155,7 +238,13 @@ class DrugProfile:
             "target": self.target.as_dict() if self.target else None,
             "disease": self.disease.as_dict() if self.disease else None,
             "criteria": self.criteria_rows(),
-            "weights": dict(self.weights),
+            # `weights` is the renormalized table that scored this run, so the
+            # profile and the scoring agree. The pre-normalization numbers are
+            # kept alongside rather than dropped, for anything reconciling
+            # against the defaults.
+            "weights": self.effective_weights(),
+            "rawWeights": dict(self.weights),
+            "hiddenCriteria": self.hidden_keys(),
             "exclusion": dict(self.exclusion),
             "ligandCount": len(self.ligands),
             "ligands": [ligand.as_dict() for ligand in self.ligands],

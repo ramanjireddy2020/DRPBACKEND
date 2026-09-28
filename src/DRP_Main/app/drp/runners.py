@@ -311,6 +311,13 @@ def _resolve_disease(query: str) -> Tuple[str, str]:
     )
 
 
+#: BioKG node type → the node type the graph payload reports.
+#:
+#: `genetic_disorder` is its own type, not "Comorbidity". An OMIM genetic
+#: disorder linked to a disease's genes is the *genetic basis* of that disease,
+#: not a condition the patient also has, so labelling it a comorbidity asserted
+#: a clinical relationship the graph never claimed. "Comorbidity" is kept for
+#: the edges that do mean it: another disease, or a disease category.
 _SPEC_NODE_TYPES = {
     "disease": "Comorbidity",
     "gene/protein": "Protein",
@@ -322,7 +329,7 @@ _SPEC_NODE_TYPES = {
     "complex": "Pathway",
     "tissue": "Pathway",
     "cell": "Pathway",
-    "genetic_disorder": "Comorbidity",
+    "genetic_disorder": "Genetic Disorder",
     "disease_category": "Comorbidity",
     "drug": "Compound",
     "compound": "Compound",
@@ -333,6 +340,7 @@ GRAPH_LEGEND = {
     "Protein": "#1E88E5",
     "Pathway": "#065B52",
     "Compound": "#00897B",
+    "Genetic Disorder": "#8E24AA",
     "Comorbidity": "#E61919",
 }
 
@@ -1371,8 +1379,14 @@ def _persist_articles(job_id: str, results: List[Dict[str, Any]]) -> List[Dict[s
 @register("curatex.target_profile")
 async def run_curatex_target_profile(params: Dict[str, Any], ctx: JobContext) -> Dict[str, Any]:
     """
-    Tool 1 (§5) — the editable weighted drug profile built from the target's
-    known ligands, plus the exclusion flag when a disease is supplied.
+    Tool 1 (§5) — the editable weighted Ideal Candidate Profile built from the
+    target's known ligands, plus the exclusion flag when a disease is supplied.
+
+    "Ideal Candidate Profile" throughout the user-facing text: this describes the
+    properties a good repurposing *drug* would have, and calling it a "target
+    profile" read as a profile of the biological target, which is a different
+    thing entirely and sits one step earlier in the same workflow. The job kind
+    stays `curatex.target_profile` — it is a stored key on existing jobs.
     """
     from DRP_Main.app.modules.drug_curation.curatex_service import CurateXError, CurateXService
 
@@ -1410,7 +1424,8 @@ async def run_curatex_target_profile(params: Dict[str, Any], ctx: JobContext) ->
         "editable": True,
         "sessionId": ctx.session_id or f"job:{ctx.job_id}",
         "summary": (
-            f"Profile for {target} built from {profile.get('ligandCount', 0)} known ligand(s)"
+            f"Ideal Candidate Profile for {target} built from "
+            f"{profile.get('ligandCount', 0)} known ligand(s)"
         ),
     }
 
@@ -1632,11 +1647,19 @@ async def _run_screensuite_on_databricks(params: Dict[str, Any], ctx: JobContext
                 "stage": "awaiting_structure_confirmation",
                 "target": target,
                 "structureChoices": candidates,
+                # `hits: []` alongside a completed job read as "docking returned
+                # no hits", so the screen showed "Docking output is not
+                # available" underneath a question it was actually asking. The
+                # empty list stays — removing a key the UI already reads would
+                # break it — but these two say plainly that nothing was screened
+                # *yet*. Branch on `awaitingInput`, never on `hits.length`.
+                "awaitingInput": True,
+                "awaitingInputKind": "structure",
                 "hits": [],
                 "totalHits": 0,
                 "summary": (
                     f"'{target}' matches {len(candidates)} structures. "
-                    "Choose one to screen against."
+                    "Choose one to screen against — nothing has been docked yet."
                 ),
             }
         raise RunnerError(f"Screening produced no hits for '{target}'. {reason}")
@@ -1836,6 +1859,53 @@ def _as_float(value: Any) -> Optional[float]:
 
 
 # ── NovSearch ─────────────────────────────────────────────────────────────────
+def _patent_rows(
+    table: List[Dict[str, Any]], used: List[str]
+) -> List[Dict[str, Any]]:
+    """
+    Normalise `novsearch_service`'s patents table for the wire.
+
+    Three problems were passed straight through to the UI:
+
+    1. The keys are snake_case (`patent_id`, `filing_date`, `relevance_score`)
+       while every other payload on this API is camelCase, so the UI read
+       `patentId` and got `undefined`. That is why the results table could not
+       render a patent link — it had the id all along under a name it never
+       looked up.
+    2. There was no link field at all, so each row had to be turned into a URL
+       by hand. Google Patents resolves a bare publication number, so the id is
+       enough to build one here, once.
+    3. Every retrieved patent is listed, but only the ones that were indexed can
+       be asked about. Selecting any other one answered "These patents are not
+       indexed", with no way to know that in advance. `indexed` says which rows
+       support Chat with Patent.
+
+    The original snake_case keys are kept alongside the camelCase ones: anything
+    already reading them keeps working, and nothing has to change at once.
+    """
+    indexed = {str(p) for p in (used or [])}
+    rows: List[Dict[str, Any]] = []
+    for row in table or []:
+        pid = str(row.get("patent_id") or "").strip()
+        out = dict(row)
+        out.update(
+            {
+                "patentId": pid,
+                "title": row.get("title", ""),
+                "abstractSnippet": row.get("abstract_snippet", ""),
+                "assignee": row.get("assignee", ""),
+                "filingDate": row.get("filing_date"),
+                "publicationDate": row.get("publication_date"),
+                "relevanceScore": row.get("relevance_score"),
+                "rank": row.get("rank"),
+                "url": f"https://patents.google.com/patent/{pid}" if pid else "",
+                "indexed": pid in indexed,
+            }
+        )
+        rows.append(out)
+    return rows
+
+
 @register("novsearch.assess")
 async def run_novsearch_assess(params: Dict[str, Any], ctx: JobContext) -> Dict[str, Any]:
     """
@@ -1881,7 +1951,9 @@ async def run_novsearch_assess(params: Dict[str, Any], ctx: JobContext) -> Dict[
         "disease": (params.get("disease") or "").strip(),
         "assessment": report.get("agent_answer", ""),
         "recommendations": list(recommendations or []),
-        "patents": result.get("patents_table", []),
+        "patents": _patent_rows(
+            result.get("patents_table", []), report.get("patents_used", [])
+        ),
         "patentsUsed": report.get("patents_used", []),
         "totalPatents": report.get("total_patents", 0),
         "totalChunks": report.get("total_chunks", 0),

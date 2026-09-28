@@ -16,6 +16,24 @@ from dataclasses import dataclass, field
 from statistics import median
 from typing import Any, Dict, List, Optional, Sequence
 
+
+def _percentile(values: Sequence[float], fraction: float) -> Optional[float]:
+    """
+    Linear-interpolated percentile, on an already-sorted sequence.
+
+    `statistics.quantiles` needs at least two points and returns the whole set of
+    cut points; this is one value and works on a single observation, which the
+    sparser DailyMed-derived criteria routinely have.
+    """
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    position = (len(values) - 1) * fraction
+    low = int(position)
+    high = min(low + 1, len(values) - 1)
+    return values[low] + (values[high] - values[low]) * (position - low)
+
 from DRP_Main.app.modules.drug_curation.criteria_config import (
     CATEGORICAL,
     CRITERIA,
@@ -38,12 +56,34 @@ class CriterionBaseline:
     minimum: Optional[float] = None
     maximum: Optional[float] = None
     median_value: Optional[float] = None
+    # The interquartile band. Scoring normalizes against this rather than
+    # min-max: one outlier used to define the whole scale, so on a set whose
+    # adverse-event LLR ran 8.7 to 6807 every ordinary drug scored within a
+    # rounding error of the same value and the criterion stopped discriminating.
+    p25: Optional[float] = None
+    p75: Optional[float] = None
     # Categorical criteria carry a value histogram instead of a range.
     distribution: Dict[str, int] = field(default_factory=dict)
 
     @property
     def coverage(self) -> float:
         return round(self.count / self.total, 3) if self.total else 0.0
+
+    @property
+    def discriminating(self) -> bool:
+        """
+        Whether this criterion can separate one candidate from another.
+
+        A criterion every drug shares — 324/324 not withdrawn, every ligand at
+        phase 4 — contributes an identical term to every composite. It cannot
+        change an ordering, but it still consumes weight, so it dilutes the
+        criteria that can. Reported so the profile can drop it and renormalize.
+        """
+        if self.kind == NUMERIC:
+            if self.minimum is None or self.maximum is None:
+                return False
+            return self.maximum > self.minimum
+        return len([v for v in self.distribution.values() if v]) > 1
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -53,6 +93,9 @@ class CriterionBaseline:
             "min": self.minimum,
             "max": self.maximum,
             "median": self.median_value,
+            "p25": self.p25,
+            "p75": self.p75,
+            "discriminating": self.discriminating,
             "distribution": dict(self.distribution) or None,
         }
 
@@ -75,9 +118,13 @@ def build_baselines(
             numbers = [n for n in numbers if n is not None]
             baseline.count = len(numbers)
             if numbers:
-                baseline.minimum = min(numbers)
-                baseline.maximum = max(numbers)
-                baseline.median_value = round(median(numbers), 4)
+                ordered = sorted(numbers)
+                baseline.minimum = ordered[0]
+                baseline.maximum = ordered[-1]
+                baseline.median_value = round(median(ordered), 4)
+                low, high = _percentile(ordered, 0.25), _percentile(ordered, 0.75)
+                baseline.p25 = round(low, 4) if low is not None else None
+                baseline.p75 = round(high, 4) if high is not None else None
         else:
             texts = [str(v) for v in values]
             baseline.count = len(texts)
@@ -135,10 +182,15 @@ def apply_value_overrides(
                 baseline.maximum = high if high is not None else baseline.maximum
                 mid = [v for v in (baseline.minimum, baseline.maximum) if v is not None]
                 baseline.median_value = round(sum(mid) / len(mid), 4) if mid else None
+                # Scoring normalizes against the band, so a hand-entered range has
+                # to move it too — otherwise the edit would be shown back to the
+                # researcher while the learned quartiles quietly did the scoring.
+                baseline.p25, baseline.p75 = baseline.minimum, baseline.maximum
                 notes.append(f"{key}: scored against your range "
                              f"{baseline.minimum}-{baseline.maximum}.")
             else:
                 baseline.minimum = baseline.maximum = baseline.median_value = point
+                baseline.p25 = baseline.p75 = point
                 notes.append(f"{key}: scored against your value {point}.")
         else:
             text = str(raw.get("value", raw.get("target")) if isinstance(raw, dict) else raw)
@@ -174,14 +226,24 @@ def normalize(criterion: Criterion, value: Any, baseline: Optional[CriterionBase
     if baseline is None or baseline.minimum is None or baseline.maximum is None:
         return None
 
-    span = baseline.maximum - baseline.minimum
-    if span <= 0:
-        # Every reference ligand shares one value: a candidate matching it is a
-        # perfect match, anything else is not. Dividing by zero is not an option
-        # and 0.5-for-everyone would waste the criterion's weight.
-        return 1.0 if abs(number - baseline.minimum) < 1e-9 else 0.0
+    # Normalize against the interquartile band, not the full range. One extreme
+    # ligand used to set the entire scale: with adverse-event LLR running 8.7 to
+    # 6807, every drug below ~200 landed inside the bottom 3% of the scale and
+    # scored indistinguishably, so a criterion carrying real weight separated
+    # nothing. Anchoring on p25–p75 puts the resolution where the candidates
+    # actually are; values outside the band clip to 0 or 1, which is the correct
+    # reading of "better than the top quartile of known ligands".
+    low = baseline.p25 if baseline.p25 is not None else baseline.minimum
+    high = baseline.p75 if baseline.p75 is not None else baseline.maximum
 
-    normalized = (number - baseline.minimum) / span
+    span = high - low
+    if span <= 0:
+        # Every reference ligand in the band shares one value: a candidate
+        # matching it is a perfect match, anything else is not. Dividing by zero
+        # is not an option and 0.5-for-everyone would waste the weight.
+        return 1.0 if abs(number - low) < 1e-9 else 0.0
+
+    normalized = (number - low) / span
     normalized = max(0.0, min(1.0, normalized))
     if criterion.direction == LOWER_IS_BETTER:
         normalized = 1.0 - normalized

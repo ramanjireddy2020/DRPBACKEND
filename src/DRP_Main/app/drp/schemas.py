@@ -19,7 +19,9 @@ ProjectStatus = Literal["Active", "On Hold", "Review"]
 JobStatus = Literal["queued", "running", "completed", "failed"]
 ResultType = Literal["targets", "subgraph", "metapath", "litminex_results", "article"]
 ExportFormat = Literal["csv", "json", "png", "svg"]
-NodeType = Literal["Disease Hub", "Protein", "Pathway", "Compound", "Comorbidity"]
+NodeType = Literal[
+    "Disease Hub", "Protein", "Pathway", "Compound", "Genetic Disorder", "Comorbidity"
+]
 
 
 class _Wire(BaseModel):
@@ -512,7 +514,13 @@ class CompoundPage(_Wire):
 
 
 class TargetProfile(_Wire):
-    """The editable target product profile behind the CurateX profile screen."""
+    """
+    The editable Ideal Candidate Profile behind the CurateX profile screen.
+
+    The class name is kept so the generated OpenAPI schema name does not change
+    under clients already generated from it; the description is what the UI and
+    the docs show.
+    """
 
     target: str = ""
     profile: Dict[str, Any] = Field(default_factory=dict)

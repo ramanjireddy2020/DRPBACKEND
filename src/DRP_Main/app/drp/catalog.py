@@ -19,47 +19,52 @@ THERAPEUTIC_AREAS: list[str] = [
     "Nephrology",
 ]
 
+#: The five user-facing agents, in pipeline order.
+#:
+#: "SaaS Pipeline" is deliberately absent. It is still a valid `ModuleKey` and
+#: still has a runner, so sessions and jobs that already reference it keep
+#: working — it is simply not offered. Listing it put a sixth "agent" in the
+#: supervisor's menu that is an orchestration mode, not an agent, and choosing
+#: it from that menu returned 422.
+#:
+#: `displayName` is the agreed user-facing agent name. It was previously the
+#: internal key with drifted casing ("TxKG Query", "CuraTeX"), which is what the
+#: UI rendered, so the platform called each module three different things.
 MODULES: list[Module] = [
     Module(
         key="TxKG",
-        displayName="TxKG Query",
+        displayName="Target Identification Agent",
         icon="network",
         description="Knowledge-graph target discovery — ranked protein targets, "
         "sub-graphs and meta-path reasoning for a disease.",
     ),
     Module(
         key="LitMineX",
-        displayName="LitMineX",
+        displayName="Literature Mining Agent",
         icon="book-open",
         description="Literature mining over PubMed with MeSH expansion and LLM "
         "relevance scoring per target.",
     ),
     Module(
         key="CurateX",
-        displayName="CuraTeX",
+        displayName="Drug Curation Agent",
         icon="flask",
-        description="Compound curation and target candidate profiling with "
-        "confidence scoring and PubMed evidence.",
+        description="Builds an Ideal Candidate Profile from known ligands, then "
+        "ranks repurposing candidates against it.",
     ),
     Module(
         key="ScreenSuite",
-        displayName="ScreenSuite",
+        displayName="Virtual Screening Agent",
         icon="crosshair",
         description="Virtual / high-throughput screening — molecular docking of "
-        "compound libraries against a receptor.",
+        "selected compounds against a selected protein structure.",
     ),
     Module(
         key="NovSearch",
-        displayName="NovSearch",
+        displayName="Novelty Search Agent",
         icon="shield-check",
         description="Novelty and freedom-to-operate assessment over patent and "
         "literature corpora.",
-    ),
-    Module(
-        key="SaaS Pipeline",
-        displayName="SaaS Pipeline",
-        icon="workflow",
-        description="End-to-end repurposing pipeline chaining all five modules.",
     ),
 ]
 
@@ -114,10 +119,12 @@ def canonical_module(name: str | None) -> str:
     return _MODULE_ALIASES.get(name.strip().lower(), name.strip())
 
 
+#: Message authorship, as it appears next to a chat bubble. Keyed by module key,
+#: including "SaaS Pipeline" so historical messages still resolve an author.
 AGENT_DISPLAY_NAMES = {
     "TxKG": "DRP TxKG Agent",
     "LitMineX": "DRP LitMineX Agent",
-    "CurateX": "DRP CuraTeX Agent",
+    "CurateX": "DRP CurateX Agent",
     "ScreenSuite": "DRP ScreenSuite Agent",
     "NovSearch": "DRP NovSearch Agent",
     "SaaS Pipeline": "DRP Pipeline Agent",

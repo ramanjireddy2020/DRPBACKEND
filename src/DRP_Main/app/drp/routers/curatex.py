@@ -26,7 +26,7 @@ def target_profile(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    """Generate a target candidate profile."""
+    """Generate the Ideal Candidate Profile for a target."""
     if not body.target.strip():
         raise HTTPException(status_code=422, detail="target is required")
     job = create_job(
@@ -115,7 +115,7 @@ def curatex_profile(
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> s.TargetProfile:
-    """The target product profile and its scoring criteria, as shown before scoring."""
+    """The Ideal Candidate Profile and its scoring criteria, as shown before scoring."""
     job = require_completed(db, jobId, user.id)
     result: Dict[str, Any] = job.result or {}
     profile = result.get("profile", {}) or {}

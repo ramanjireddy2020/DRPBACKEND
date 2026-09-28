@@ -117,11 +117,14 @@ def _write_csv(rows: List[Dict[str, Any]], path: Path) -> None:
     path.write_text(buffer.getvalue(), encoding="utf-8")
 
 
+#: Kept in step with `runners.GRAPH_LEGEND` so an exported SVG is coloured the
+#: same as the on-screen graph.
 _NODE_COLORS = {
     "Disease Hub": "#0225AA",
     "Protein": "#1E88E5",
     "Pathway": "#065B52",
     "Compound": "#00897B",
+    "Genetic Disorder": "#8E24AA",
     "Comorbidity": "#E61919",
 }
 
@@ -130,7 +133,11 @@ def _write_graph_svg(result: Dict[str, Any], path: Path) -> None:
     """Render a graph result as a standalone SVG using a circular layout."""
     import math
 
-    graph = result.get("graph") or {}
+    # TxKG stores its graph under `subgraph`; only the generic shape uses
+    # `graph`. Reading `graph` alone meant "Export Graph" on a TxKG result —
+    # the one result that always has a graph — returned 422 "contains no graph
+    # to export" every single time.
+    graph = result.get("graph") or result.get("subgraph") or {}
     nodes = graph.get("nodes") or []
     edges = graph.get("edges") or []
     if not nodes:
