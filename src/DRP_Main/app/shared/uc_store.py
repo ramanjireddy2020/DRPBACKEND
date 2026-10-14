@@ -65,6 +65,26 @@ def _sql_literal(value: Any) -> str:
     return f"'{escaped}'"
 
 
+def prewarm_warehouse() -> None:
+    """
+    Fire a trivial SQL statement to wake up the warehouse before pipeline modules run.
+
+    Call this once at the start of a multi-module pipeline run so that individual
+    module writes don't each pay the cold-start penalty independently.
+    Failures are silently logged — prewarming is best-effort.
+    """
+    if not settings.DRP_UC_WRITES_ENABLED or not settings.DRP_UC_WAREHOUSE_ID:
+        return
+    client = _get_client()
+    if client is None:
+        return
+    try:
+        _await_statement(client, "SELECT 1")
+        logger.info("uc_store: warehouse pre-warm complete")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("uc_store: warehouse pre-warm failed (non-fatal): %s", exc)
+
+
 def _await_statement(client, statement: str):
     """
     Execute `statement` and block until it reaches a terminal state.
@@ -75,10 +95,12 @@ def _await_statement(client, statement: str):
     """
     from databricks.sdk.service.sql import StatementState
 
+    # 50s is the SDK's maximum wait_timeout — gives the warehouse the best chance
+    # to spin up in the initial call and minimises subsequent polling iterations.
     response = client.statement_execution.execute_statement(
         statement=statement,
         warehouse_id=settings.DRP_UC_WAREHOUSE_ID,
-        wait_timeout="30s",
+        wait_timeout="50s",
     )
     state = response.status.state
     statement_id = response.statement_id

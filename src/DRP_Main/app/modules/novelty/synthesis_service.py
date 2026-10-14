@@ -11,6 +11,8 @@ currently indexed patent.
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -21,6 +23,17 @@ from DRP_Main.app.modules.novelty.databricks_clients import llm_client
 from DRP_Main.app.modules.novelty.indexing_service import vector_store
 
 logger = get_logger(__name__)
+
+# In-memory LRU cache for synthesis reports. Keyed on (query_hash, patent_ids_key)
+# so a repeated query over the same indexed set skips the LLM call entirely.
+_synthesis_cache: Dict[tuple, Dict[str, Any]] = {}
+_SYNTHESIS_CACHE_MAX = 64
+
+
+def _synthesis_cache_key(query: str, patent_ids: List[str]) -> tuple:
+    q_hash = hashlib.sha256(query.encode()).hexdigest()[:16]
+    return (q_hash, tuple(sorted(patent_ids)))
+
 
 _METADATA_KEYWORDS = (
     "own", "owner", "owns", "assignee", "assigned to", "inventor", "inventors",
@@ -79,11 +92,14 @@ async def _gather_context(
 ) -> Tuple[str, List[str], int]:
     """Retrieve and label top chunks per patent. Returns (context, used_ids, count)."""
     titles = titles or {}
+    # Fire all per-patent VS searches concurrently instead of sequentially.
+    all_chunks = await asyncio.gather(
+        *[vector_store.search_by_patent(question, pid, top_k=top_k) for pid in patent_ids]
+    )
     blocks: List[str] = []
     used: List[str] = []
     total = 0
-    for pid in patent_ids:
-        chunks = await vector_store.search_by_patent(question, pid, top_k=top_k)
+    for pid, chunks in zip(patent_ids, all_chunks):
         if not chunks:
             continue
         blocks.append(_patent_block(pid, titles.get(pid, pv.display_patent_id(pid)), chunks))
@@ -162,6 +178,11 @@ async def synthesize_report(
             "model_used": None,
         }
 
+    cache_key = _synthesis_cache_key(query, patent_ids)
+    if cache_key in _synthesis_cache:
+        logger.info("NovSearch synthesis cache hit — skipping LLM call")
+        return _synthesis_cache[cache_key]
+
     context, used, total_chunks = await _gather_context(query, patent_ids, titles)
     if not context:
         return {
@@ -188,7 +209,7 @@ async def synthesize_report(
         }
 
     agent_answer, recommendations = _split_report(text)
-    return {
+    result = {
         "agent_answer": agent_answer,
         "recommendations": recommendations,
         "patents_used": [pv.display_patent_id(p) for p in used],
@@ -196,6 +217,11 @@ async def synthesize_report(
         "total_chunks": total_chunks,
         "model_used": model_used,
     }
+    # Evict oldest entry before inserting to keep the cache bounded.
+    if len(_synthesis_cache) >= _SYNTHESIS_CACHE_MAX:
+        _synthesis_cache.pop(next(iter(_synthesis_cache)))
+    _synthesis_cache[cache_key] = result
+    return result
 
 
 def _split_report(text: str) -> Tuple[str, str]:
@@ -226,7 +252,21 @@ async def answer_question(
     selected subset → `multiple_patent`, nothing → every indexed patent
     (`multi_patent`). The mode names are the ones the spec's QA output declares.
     """
+    requested = [pv.normalize_patent_id(p) for p in (patent_ids or []) if p]
     indexed = vector_store.indexed_patent_ids()
+
+    # Index on demand. A patent the search listed but did not index — or one the
+    # researcher names directly — used to be refused with "These patents are not
+    # indexed. Run a novelty search first", although the fetch-and-chunk step is
+    # the same one the search runs. Asking about a patent is reason enough to
+    # index it.
+    missing = [p for p in requested if p not in indexed]
+    if missing:
+        from DRP_Main.app.modules.novelty.indexing_service import index_candidates
+
+        await index_candidates([{"patent_id": p} for p in missing])
+        indexed = vector_store.indexed_patent_ids()
+
     if not indexed:
         return {
             "answer": "No patents are indexed yet. Run a novelty search first.",
@@ -235,14 +275,14 @@ async def answer_question(
             "chunks_used": 0,
         }
 
-    requested = [pv.normalize_patent_id(p) for p in (patent_ids or []) if p]
     unknown = [p for p in requested if p not in indexed]
     if unknown:
         return {
             "answer": (
-                "These patents are not indexed: "
-                f"{', '.join(pv.display_patent_id(p) for p in unknown)}. "
-                "Run a novelty search that covers them first."
+                "I couldn't retrieve the full text of "
+                f"{', '.join(pv.display_patent_id(p) for p in unknown)} from Google Patents, "
+                "so I can't answer from it. Check the patent number, or ask about another "
+                "patent from the results."
             ),
             "mode": "single_patent" if len(requested) == 1 else "multiple_patent",
             "patent_ids_used": [],
@@ -269,9 +309,13 @@ async def _answer_single(
         meta = await vector_store.metadata_chunks(patent_id)
         chunks = meta + [c for c in chunks if c.get("section_type") != "metadata"]
     elif is_claims:
-        # Claims questions prioritise claim-tagged chunks.
-        chunks = [c for c in chunks if c.get("is_claim")] + [
-            c for c in chunks if not c.get("is_claim")
+        # Fetch claim chunks via a claim-focused query vector so all claim text is
+        # included even when the question phrasing isn't semantically similar to
+        # claim prose. Merge with non-claim semantic chunks for broader context.
+        claim_results = await vector_store.claim_chunks(patent_id)
+        claim_ids = {c.get("chunk_id") for c in claim_results}
+        chunks = claim_results + [
+            c for c in chunks if c.get("chunk_id") not in claim_ids and not c.get("is_claim")
         ]
 
     if not chunks:

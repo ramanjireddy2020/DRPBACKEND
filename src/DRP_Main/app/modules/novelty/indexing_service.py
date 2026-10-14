@@ -19,6 +19,8 @@ break API import.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -27,6 +29,12 @@ from DRP_Main.app.core.config import settings
 from DRP_Main.app.core.logging import get_logger
 from DRP_Main.app.modules.novelty import google_patents_service as pv
 from DRP_Main.app.modules.novelty.databricks_clients import embedding_client
+
+# On-disk cache path for the patent order — survives Databricks App container
+# restarts and eliminates the 2000-result warm-up probe on every cold start.
+_PATENT_CACHE_PATH = os.environ.get(
+    "NOVSEARCH_PATENT_CACHE_PATH", "/tmp/novsearch_patent_order.json"
+)
 
 logger = get_logger(__name__)
 
@@ -222,14 +230,47 @@ class VectorStore:
         logger.info("NovSearch vector index ready (%s)", settings.NOVSEARCH_VS_INDEX)
         return self._index
 
+    # ── disk cache helpers ────────────────────────────────────────────────────
+    def _load_cache(self) -> bool:
+        """Load patent order from disk. Returns True if the cache was usable."""
+        try:
+            with open(_PATENT_CACHE_PATH, "r", encoding="utf-8") as fh:
+                ids = json.load(fh)
+            if isinstance(ids, list):
+                for pid in ids:
+                    self._patent_order.setdefault(pid, True)
+                logger.info(
+                    "NovSearch: loaded %d patent IDs from disk cache (%s)",
+                    len(ids),
+                    _PATENT_CACHE_PATH,
+                )
+                return True
+        except FileNotFoundError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("NovSearch: could not read patent cache: %s", exc)
+        return False
+
+    def _save_cache(self) -> None:
+        """Persist current patent order to disk so restarts skip the VS probe."""
+        try:
+            with open(_PATENT_CACHE_PATH, "w", encoding="utf-8") as fh:
+                json.dump(list(self._patent_order.keys()), fh)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("NovSearch: could not write patent cache: %s", exc)
+
     def _ensure_loaded(self) -> None:
-        """Rebuild `_patent_order` from the index once per process."""
+        """Rebuild `_patent_order` once per process, preferring the disk cache."""
         if self._loaded:
             return
         self._loaded = True
+        # Fast path: reuse the on-disk cache written by the previous process.
+        # This avoids the 2000-result Vector Search probe on every container restart.
+        if self._load_cache():
+            return
+        # Cold start (first-ever run or cache deleted): fall back to the VS probe.
         try:
             index = self._get_index()
-            # A zero vector retrieves an arbitrary page; we only need patent ids.
             probe = [0.0] * settings.NOVSEARCH_EMBEDDING_DIM
             probe[0] = 1.0
             response = index.similarity_search(
@@ -241,6 +282,7 @@ class VectorStore:
                 pid = row.get("patent_id")
                 if pid:
                     self._patent_order.setdefault(pid, True)
+            self._save_cache()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not enumerate indexed patents: %s", exc)
 
@@ -287,6 +329,7 @@ class VectorStore:
         for chunk in chunks:
             self._patent_order.setdefault(chunk["patent_id"], True)
         self._enforce_cap()
+        self._save_cache()
         logger.info("Upserted %d chunks into Databricks Vector Search", len(rows))
         return len(rows)
 
@@ -300,13 +343,14 @@ class VectorStore:
         pid = pv.normalize_patent_id(patent_id)
         try:
             index = self._get_index()
+            # A patent generates at most ~35 chunks; 50 is a safe upper bound.
             keys = [
                 row["chunk_id"]
                 for row in self._search(
                     [0.0] * settings.NOVSEARCH_EMBEDDING_DIM,
                     patent_ids=[pid],
                     columns=["chunk_id"],
-                    num_results=1000,
+                    num_results=50,
                 )
             ]
             if keys:
@@ -314,6 +358,7 @@ class VectorStore:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Vector Search delete failed for %s: %s", pid, exc)
         self._patent_order.pop(pid, None)
+        self._save_cache()
 
     # ── retrieval (used by Tool 3) ───────────────────────────────────────────
     def _search(
@@ -362,6 +407,21 @@ class VectorStore:
         )
         rows = self._search(vector, [pid], num_results=5)
         return [r for r in rows if r.get("section_type") == "metadata"]
+
+    async def claim_chunks(self, patent_id: str) -> List[Dict[str, Any]]:
+        """All claim chunks for a patent, fetched via a claim-focused query vector.
+
+        Semantic search does not reliably surface claim chunks when the question
+        is phrased as "what are the claims?" — the query vector doesn't resemble
+        claim prose. Using a domain-targeted vector and filtering by is_claim
+        guarantees the actual claim text reaches the LLM context.
+        """
+        pid = pv.normalize_patent_id(patent_id)
+        vector = await embedding_client.embed_query(
+            "patent claim independent claim dependent claim hereby claimed"
+        )
+        rows = self._search(vector, [pid], num_results=20)
+        return [r for r in rows if r.get("is_claim")]
 
     def statistics(self) -> Dict[str, Any]:
         return {

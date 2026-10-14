@@ -365,14 +365,35 @@ def _to_spec_graph(subgraph: Dict[str, Any]) -> Dict[str, Any]:
             "id": node["id"],
             "label": resolve_label(node["id"], node.get("name")),
             "type": _spec_node_type(node.get("type", ""), bool(node.get("is_disease"))),
+            "isDisease": node.get("is_disease", False),
+            "isCandidate": node.get("is_candidate", False),
+            "category": node.get("category"),
+            "confirmed": node.get("confirmed"),
+            "noveltyLabel": node.get("novelty_label"),
+            "sourcingStatus": node.get("sourcing_status"),
         }
         for node in subgraph.get("nodes", [])
     ]
     edges = [
-        {"source": link["source"], "target": link["target"], "label": link.get("label", "")}
+        {
+            "source": link["source"],
+            "target": link["target"],
+            "label": link.get("label", ""),
+            "provenance": link.get("provenance", ""),
+            "confidence": link.get("confidence"),
+        }
         for link in subgraph.get("links", [])
     ]
-    return {"nodes": nodes, "edges": edges, "legend": GRAPH_LEGEND}
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "legend": GRAPH_LEGEND,
+        # IDs the frontend must include before applying any node cap — disease + all
+        # candidate proteins — so one well-connected protein never crowds out others.
+        "candidateNodeIds": subgraph.get("candidateNodeIds", []),
+        "metapaths": subgraph.get("metapaths", []),
+        "statistics": subgraph.get("statistics", {}),
+    }
 
 
 def _spec_targets(raw_targets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -415,35 +436,58 @@ def _readable_path(path: Dict[str, Any]) -> str:
     return " ".join(out)
 
 
+def _structured_path(path: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    One connecting path as data: `{node_names, node_types, edge_labels, hop_count}`.
+
+    Node names are resolved the same way the graph's labels are, so a path no
+    longer reads "… → hsa04935" where the graph beside it says "Type II diabetes
+    mellitus": BioKG leaves pathway, GO and OMIM nodes named by accession.
+    """
+    from DRP_Main.app.modules.txkg.node_labels import resolve as resolve_label
+
+    ids = list(path.get("nodes") or [])
+    names = list(path.get("node_names") or [])
+    resolved = [
+        resolve_label(str(ids[i]), str(name)) if i < len(ids) else str(name)
+        for i, name in enumerate(names)
+    ]
+    labels = list(path.get("edge_labels") or [])
+    return {
+        "node_ids": ids,
+        "node_names": resolved,
+        "node_types": list(path.get("node_types") or []),
+        "edge_labels": labels,
+        "edge_sources": list(path.get("edge_sources") or []),
+        "hop_count": path.get("hop_count", max(len(resolved) - 1, 0)),
+    }
+
+
 def _discovery_targets(candidates: List[Dict[str, Any]],
                        disease_name: str = "") -> List[Dict[str, Any]]:
     """
     Map the discovery service's candidate records onto the wire `Target` shape.
 
-    `score` is normalised to 0-100 so the UI can present it as a percentage. The
-    underlying corrected score is `-log10 p` from the degree-corrected random walk,
-    which is unbounded — values above 100 were reaching the UI and reading as a
-    broken percentage. Normalisation is relative to the strongest candidate in the
-    same run, so the top target is 100 and everything else is its share of that;
-    ranking is unchanged because the transform is monotonic.
-
-    The raw value stays available as `correctedScore` for anyone who needs the
-    absolute figure.
+    `score` is the corrected score mapped to 0-100 via S/(S+100).
+    The formula preserves ranking and avoids any run-to-run rescaling:
+    a protein with corrected_score 260 always displays as ~72, regardless of
+    what the other candidates in this run score.
+    `correctedScore` carries the raw absolute value (-log10 p) for reference.
     """
-    raw_scores = [float(c.get("corrected_score") or 0.0) for c in candidates]
-    top = max(raw_scores, default=0.0)
-
-    def _percent(value: float) -> float:
-        # A run with no signal at all must not divide by zero.
-        return round(100.0 * value / top, 2) if top > 0 else 0.0
+    def _scaled(value: float) -> float:
+        # score = 100 × S / (S + 100)  where S = corrected_score (-log10 p)
+        # Asymptotically approaches 100 for very high scores; 0 for S=0.
+        if value <= 0.0:
+            return 0.0
+        return round(100.0 * value / (value + 100.0), 2)
 
     return [
         {
             "uniprotId": c["uniprot_id"],
             "name": c.get("name") or c["uniprot_id"],
-            # 0-100 relative relevance. `hopDistance` is deliberately absent:
+            # 0-100 absolute relevance via S/(S+100). `hopDistance` is absent:
             # nothing is hop-bounded.
-            "score": _percent(float(c.get("corrected_score") or 0.0)),
+            "score": _scaled(float(c.get("corrected_score") or 0.0)),
             "correctedScore": float(c.get("corrected_score") or 0.0),
             "geneName": c.get("gene_name"),
             "fullName": c.get("full_name"),
@@ -451,13 +495,15 @@ def _discovery_targets(candidates: List[Dict[str, Any]],
             "connectionTypes": sorted(
                 {p["metapath"] for p in c.get("paths", []) if p.get("metapath")}
             ),
-            # The same paths with real entity names rather than node types, so the
-            # UI can show "Thrombocytosis —Associated With→ JAK2" instead of
-            # "disease→gene/protein". Shortest, best-sourced paths come first
-            # (discovery_service sorts them), so the first few are the useful ones.
-            "connectionPaths": [
+            # The same paths with real entity names rather than node types.
+            # Structured, so the UI can colour each node by type and show the
+            # relations as their own chips; a display string lost both. Shortest,
+            # best-sourced paths come first (discovery_service sorts them).
+            "connectionPaths": [_structured_path(p) for p in c.get("paths", [])[:5] if p.get("node_names")],
+            # The previous display-string form, kept for anything that reads it.
+            "connectionPathTexts": [
                 readable
-                for readable in (_readable_path(p) for p in c.get("paths", [])[:5])
+                for readable in (_readable_path(_structured_path(p)) for p in c.get("paths", [])[:5])
                 if readable
             ],
             "fromKnowledgeGraph": True,
@@ -479,9 +525,10 @@ def _discovery_targets(candidates: List[Dict[str, Any]],
                     if src
                 }
             ),
-            # Same sources, resolved to the record that backs the claim so the
-            # Sources panel can link to it instead of a database home page.
-            "supportingSourceLinks": _source_links(
+            # Record-level links: first the pathway / GO records on this target's
+            # own connecting paths, then the protein's records in each source
+            # database — never a database home page or a free-text search.
+            "supportingSourceLinks": _path_record_links(c.get("paths", [])[:5]) + _source_links(
                 c.get("supporting_sources")
                 or sorted(
                     {
@@ -512,12 +559,53 @@ _SOURCE_LINKS: List[Tuple[str, str, str]] = [
     # edge to one database when several contributed.
     ("intact",   "IntAct",   "https://www.ebi.ac.uk/intact/search?query={uniprot}"),
     ("reactome", "Reactome", "https://reactome.org/content/query?q={uniprot}&species=Homo+sapiens"),
-    ("kegg",     "KEGG",     "https://www.genome.jp/dbget-bin/www_bfind_sub?dbkey=genes&keywords={gene}"),
+    # KEGG's record for this protein, keyed on its UniProt accession — the gene
+    # search this replaced listed every organism's JAK2.
+    ("kegg",     "KEGG",     "https://www.kegg.jp/entry/up:{uniprot}"),
     ("smpdb",    "SMPDB",    "https://smpdb.ca/search?query={uniprot}"),
     ("uniprot",  "UniProt",  "https://www.uniprot.org/uniprotkb/{uniprot}/entry"),
     ("go ",      "QuickGO",  "https://www.ebi.ac.uk/QuickGO/annotations?geneProductId={uniprot}"),
     ("disgenet", "DisGeNET", "https://www.disgenet.org/search?q={gene}"),
 ]
+
+
+#: The record page for a pathway / ontology node on a connecting path.
+_PATH_RECORD_LINKS: List[Tuple[re.Pattern, str, str]] = [
+    (re.compile(r"^hsa\d{5}$"), "KEGG", "https://www.kegg.jp/pathway/{id}"),
+    (re.compile(r"^R-[A-Z]{3}-\d+$"), "Reactome", "https://reactome.org/content/detail/{id}"),
+    (re.compile(r"^GO:\d{7}$"), "QuickGO", "https://www.ebi.ac.uk/QuickGO/term/{id}"),
+]
+
+
+def _path_record_links(paths: Sequence[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """
+    Links to the specific pathway and GO records a target's connecting paths run
+    through — the records the claim actually rests on. Searching Reactome for the
+    protein listed every pathway it is in, not the one that connects it to the
+    disease.
+    """
+    from DRP_Main.app.modules.txkg.node_labels import resolve as resolve_label
+
+    out: List[Dict[str, str]] = []
+    seen = set()
+    for path in paths or []:
+        names = path.get("node_names") or []
+        for i, node_id in enumerate(path.get("nodes") or []):
+            node_id = str(node_id)
+            if node_id in seen:
+                continue
+            for pattern, name, template in _PATH_RECORD_LINKS:
+                if pattern.match(node_id):
+                    seen.add(node_id)
+                    label = resolve_label(node_id, names[i] if i < len(names) else None)
+                    out.append({
+                        "name": name,
+                        "url": template.format(id=quote(node_id, safe=":")),
+                        "describes": label,
+                        "recordId": node_id,
+                    })
+                    break
+    return out
 
 
 def _source_links(sources: Sequence[str], uniprot: str, gene: str,
@@ -555,7 +643,25 @@ def _source_links(sources: Sequence[str], uniprot: str, gene: str,
 #: "'jak2' matches several structures — resend with one identifier. Candidates:
 #: 7F7W (JAK2-JH2), 8C09 (Crystal structure of JAK2 JH2-I559F), ..."
 _AMBIGUOUS_RE = re.compile(r"matches several structures.*?Candidates:\s*(.+)$", re.S)
+_AMBIGUOUS_NAME_RE = re.compile(r"'([^']+)' matches several structures")
 _CANDIDATE_RE = re.compile(r"\b([0-9][A-Za-z0-9]{3})\s*\(([^)]*)\)")
+
+
+def _structure_choices_by_target(failures: Sequence[str]) -> List[Dict[str, Any]]:
+    """
+    One `{target, choices}` entry per protein that needs a structure picked.
+
+    `_structure_choices` flattens every ambiguous protein into one list, so a
+    JAK2 + MPL run showed MPL's structures under the heading "'JAK2' matches 10
+    structures" — and picking one of them would have docked it as JAK2.
+    """
+    out: List[Dict[str, Any]] = []
+    for failure in failures or []:
+        name = _AMBIGUOUS_NAME_RE.search(str(failure))
+        choices = _structure_choices([failure])
+        if name and choices:
+            out.append({"target": name.group(1), "choices": choices})
+    return out
 
 
 def _structure_choices(failures: Sequence[str]) -> List[Dict[str, str]]:
@@ -745,11 +851,63 @@ async def run_txkg_query(params: Dict[str, Any], ctx: JobContext) -> Dict[str, A
 # ── Knowledge graph ───────────────────────────────────────────────────────────
 @register("subgraph.generate")
 async def run_subgraph_generate(params: Dict[str, Any], ctx: JobContext) -> Dict[str, Any]:
-    """Build a disease sub-graph and reduce it to the spec's node/edge model."""
+    """Build a disease sub-graph and reduce it to the spec's node/edge model.
+
+    When `txkgJobId` is supplied the runner re-uses the candidate subgraph that
+    `run_txkg_query` already built — it contains the scored proteins with their
+    metapath routes and shared biological-context nodes (pathway/GO clusters).
+    The legacy BFS path is kept for calls that don't carry a `txkgJobId`.
+    """
     await _load_txkg()
-    from DRP_Main.app.api.v1.endpoints.txkg_test import get_subgraph
 
     disease = params.get("disease") or ""
+    txkg_job_id = params.get("txkgJobId")
+
+    if txkg_job_id:
+        # Fast path: pull the candidate subgraph from the completed TxKG job.
+        # It was built by build_candidate_subgraph() and includes all scored
+        # proteins plus shared pathway/GO annotation nodes (Phase 3), so the
+        # graph matches what the metapath tab shows rather than an unrelated
+        # context-graph BFS.
+        from DRP_Main.app.drp.jobs import JobSession
+        from DRP_Main.app.drp.models import DrpJob
+
+        ctx.progress(f"Loading candidate graph for {disease}...")
+        db = JobSession()
+        try:
+            txkg_job = db.query(DrpJob).filter(DrpJob.id == txkg_job_id).first()
+            if not txkg_job or txkg_job.status != "completed":
+                raise RunnerError(
+                    f"TxKG job {txkg_job_id} is not completed — cannot build subgraph."
+                )
+            job_result: Dict[str, Any] = txkg_job.result or {}
+        finally:
+            db.close()
+
+        graph = job_result.get("subgraph") or {}
+        disease_name = job_result.get("disease") or disease
+        disease_id = job_result.get("diseaseId") or ""
+        stats_raw = graph.get("statistics") or {}
+        pathway_connections = sum(
+            count
+            for nt, count in stats_raw.get("entity_counts", {}).items()
+            if nt in ("pathway", "biological_process", "molecular_function", "cellular_component")
+        )
+        return {
+            "disease": disease_name,
+            "diseaseId": disease_id,
+            "selectedTarget": params.get("selectedTarget"),
+            "graph": graph,
+            "stats": {
+                "relationshipsFound": stats_raw.get("total_edges", len(graph.get("edges", []))),
+                "drugCandidates": 0,
+                "pathwayConnections": pathway_connections,
+            },
+        }
+
+    # Legacy path: disease context-graph BFS (no txkgJobId supplied).
+    from DRP_Main.app.api.v1.endpoints.txkg_test import get_subgraph
+
     ctx.progress(f"Generating knowledge sub-graph for {disease}...")
     disease_id, disease_name = await asyncio.to_thread(_resolve_disease, disease)
 
@@ -1082,6 +1240,11 @@ async def run_pipeline(params: Dict[str, Any], ctx: JobContext) -> Dict[str, Any
 
     stages: List[Dict[str, Any]] = []
     results: Dict[str, Any] = {}
+
+    # Pre-warm the SQL warehouse once so individual module writes don't each pay
+    # the cold-start penalty independently.
+    from DRP_Main.app.shared.uc_store import prewarm_warehouse
+    prewarm_warehouse()
     targets: List[Dict[str, Any]] = []
     disease = ""
     top_target = ""
@@ -1156,7 +1319,7 @@ async def run_pipeline(params: Dict[str, Any], ctx: JobContext) -> Dict[str, Any
         )
 
     completed = [s["module"] for s in stages if s["status"] == "Completed"]
-    return {
+    pipeline_result = {
         "query": query,
         "disease": disease,
         "topTarget": top_target,
@@ -1170,6 +1333,48 @@ async def run_pipeline(params: Dict[str, Any], ctx: JobContext) -> Dict[str, Any
             else "Pipeline produced no completed stages"
         ),
     }
+
+    # Auto-save the pipeline run into the project when the job is project-linked.
+    try:
+        import uuid as _uuid
+        from DRP_Main.app.drp.jobs import JobSession
+        from DRP_Main.app.drp.models import DrpJob as _DrpJob
+        from DRP_Main.app.drp.models import DrpProject as _DrpProject
+        from DRP_Main.app.drp.models import DrpProjectItem, utcnow
+
+        _db = JobSession()
+        try:
+            _job = _db.query(_DrpJob).filter(_DrpJob.id == ctx.job_id).first()
+            if _job and _job.project_id:
+                _item = DrpProjectItem(
+                    id=f"item_{_uuid.uuid4().hex[:12]}",
+                    project_id=_job.project_id,
+                    session_id=ctx.session_id,
+                    result_id=ctx.job_id,
+                    result_type="pipeline",
+                    payload={
+                        "query": query,
+                        "disease": disease,
+                        "topTarget": top_target,
+                        "stages": stages,
+                        "summary": pipeline_result["summary"],
+                    },
+                )
+                _db.add(_item)
+                _project = _db.query(_DrpProject).filter(_DrpProject.id == _job.project_id).first()
+                if _project:
+                    _project.updated_at = utcnow()
+                _db.commit()
+                logger.info("pipeline: auto-saved result to project %s", _job.project_id)
+        except Exception as _exc:
+            logger.warning("pipeline: could not auto-save to project: %s", _exc)
+            _db.rollback()
+        finally:
+            _db.close()
+    except Exception as _exc:
+        logger.warning("pipeline: auto-save skipped: %s", _exc)
+
+    return pipeline_result
 
 
 async def _mine_articles_fallback(
@@ -1474,7 +1679,13 @@ async def run_curatex_compounds(params: Dict[str, Any], ctx: JobContext) -> Dict
         "compounds": table,
         "excluded": result.get("excludedCandidates", []),
         "scoreOnly": result.get("scoreOnlyCandidates", []),
-        "recommendation": result.get("recommendation", ""),
+        # Structured like TxKG's: the prose plus the top five to take forward.
+        "recommendation": {
+            "text": result.get("recommendation", "") or "",
+            "items": result.get("recommendationItems", []) or [],
+        },
+        # The prose alone, as `recommendation` used to be.
+        "recommendationText": result.get("recommendation", "") or "",
         "profile": result.get("profile", {}),
         "searchMetadata": metadata,
         "warnings": result.get("warnings", []),
@@ -1565,10 +1776,39 @@ def _screensuite_job_query(target: str, params: Dict[str, Any]) -> Dict[str, Any
     The `/v1` contract carries a free-text `target` and `compounds` as
     `[{drug_name, ...}]`. A compound may also carry `identifier`/`source` (e.g. a
     PubChem CID); when present the job uses it as-is and skips the name lookup.
+
+    `proteins` is a list because the job has always accepted one — the `/v1`
+    layer simply never sent more than a single entry, so ticking four targets and
+    continuing to ScreenSuite screened only the first. `params["targets"]` now
+    carries the whole selection; `target` alone is still honoured so an older
+    caller keeps working.
     """
-    protein: Dict[str, str] = {"name": target}
-    if _PDB_ID.match(target):
-        protein = {"name": target, "identifier": target.upper(), "source": "pdb"}
+    selected = [
+        str(name).strip()
+        for name in (params.get("targets") or [])
+        if str(name or "").strip()
+    ]
+    if not selected and target:
+        selected = [target]
+
+    # A structure the researcher already chose for a protein (from the picker or
+    # named in the message) is sent as its identifier, so the job docks that
+    # entry instead of searching RCSB by name and asking the same question again.
+    structures = {
+        str(k).strip().upper(): str(v).strip().upper()
+        for k, v in (params.get("structures") or {}).items()
+        if str(k or "").strip() and str(v or "").strip()
+    }
+
+    proteins: List[Dict[str, str]] = []
+    for name in selected:
+        chosen = structures.get(name.upper())
+        if chosen:
+            proteins.append({"name": name, "identifier": chosen, "source": "pdb"})
+        elif _PDB_ID.match(name):
+            proteins.append({"name": name, "identifier": name.upper(), "source": "pdb"})
+        else:
+            proteins.append({"name": name})
 
     drugs: List[Dict[str, str]] = []
     for compound in params.get("compounds") or []:
@@ -1588,7 +1828,177 @@ def _screensuite_job_query(target: str, params: Dict[str, Any]) -> Dict[str, Any
                 entry["source"] = source
         drugs.append(entry)
 
-    return {"proteins": [protein], "drugs": drugs}
+    return {"proteins": proteins, "drugs": drugs}
+
+
+def _awaiting_structures(
+    target: str, resume: Dict[str, Any], pending: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    The result for a run that stopped to ask which PDB structure to dock against.
+
+    An ambiguous structure is a question, not a failure: docking the wrong JAK2
+    domain is far more expensive than one round trip. Mirrors CurateX's
+    `awaiting_target_confirmation`. Branch on `awaitingInput`, never on
+    `hits.length` — `hits: []` stays only because the UI already reads it.
+    """
+    first = pending[0]
+    return {
+        "stage": "awaiting_structure_confirmation",
+        # The protein the flat lists belong to — not simply the first selected
+        # one, which is how MPL's structures were listed under JAK2.
+        "target": first["target"] or target,
+        **resume,
+        "structureChoices": first["choices"],
+        # The same shortlist in the shape the UI asked for; answer with `pdbId`
+        # (or `structures: {protein: pdbId}` for several proteins).
+        "pdbOptions": [
+            {"pdbId": c["id"], "title": c.get("title") or "", "protein": first["target"]}
+            for c in first["choices"]
+        ],
+        # Every protein still waiting on a choice, each with its own list.
+        "pendingStructures": pending,
+        "awaitingInput": True,
+        "awaitingInputKind": "structure",
+        "hits": [],
+        "totalHits": 0,
+        "summary": (
+            "Choose a structure to screen against — nothing has been docked yet. "
+            + "; ".join(f"'{p['target']}' matches {len(p['choices'])} structures" for p in pending)
+            + "."
+        ),
+    }
+
+
+def _screensuite_task_payload(run_id: Any) -> Optional[Dict[str, Any]]:
+    """
+    What the `screensuite` docking task returned as its exit value — rows, the
+    persisted results manifest and failures — or None.
+
+    Reading the rows from Gold instead cost ~14 s through the SQL warehouse, and
+    the task had to finish its own ~34 s Gold write before the run counted as done.
+    """
+    import json
+
+    try:
+        raw = execution.task_output(run_id, "screensuite")
+        payload = json.loads(raw) if raw else None
+    except Exception:  # noqa: BLE001 — Gold is the fallback for the rows
+        logger.warning("ScreenSuite task output unreadable for run %s", run_id, exc_info=True)
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _record_screening_owner(ctx: JobContext, screening_id: str) -> None:
+    """In the background: who owns this screening, on the volume (restart recovery)."""
+    import threading
+
+    def _write() -> None:
+        from DRP_Main.app.drp import screensuite_results
+        from DRP_Main.app.drp.jobs import JobSession
+        from DRP_Main.app.models.user import User
+
+        db = JobSession()
+        try:
+            user = db.query(User).filter(User.id == ctx.user_id).first()
+            email = (user.email if user else "") or ""
+        finally:
+            db.close()
+        screensuite_results.record_owner(screening_id, email, ctx.user_id, ctx.job_id)
+
+    threading.Thread(target=_write, daemon=True).start()
+
+
+def _pre_resolve(query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Resolve names to structures in the API, before the Databricks job starts.
+
+    Resolution is a handful of RCSB / PubChem lookups — seconds — but it used to
+    run inside the job, after several minutes of cluster start-up and package
+    installs. So an ambiguous "JAK2" or a misspelt drug only came back once all
+    of that had been paid for. Doing it here returns the question, or the
+    failure, straight away, and hands the job identifiers it need not look up.
+
+    Returns `{"query", "pending", "unresolved"}`, or None when resolution itself
+    could not run — the job then resolves as it always did.
+    """
+    try:
+        from DRP_Main.app.modules.screening import resolution_service
+        from DRP_Main.app.modules.screening.schemas import DrugQuery, ProteinQuery
+
+        result = resolution_service.resolve(
+            [ProteinQuery(**p) for p in query["proteins"]],
+            [DrugQuery(**d) for d in query["drugs"]],
+            allow_partial=True,
+        )
+    except Exception:  # noqa: BLE001 — the job's own resolution is the fallback
+        logger.warning("ScreenSuite pre-resolution failed; the job will resolve", exc_info=True)
+        return None
+
+    def _source(value: Any) -> str:
+        return str(getattr(value, "value", value))
+
+    pending = [
+        {
+            "target": entity.name,
+            "choices": [{"id": c.identifier.upper(), "title": c.title or ""} for c in entity.candidates],
+        }
+        for entity in result.ambiguous
+        if entity.kind == "protein"
+    ]
+    # An ambiguous drug is left to the job, by name, as before.
+    ambiguous_drugs = [
+        {"name": entity.name} for entity in result.ambiguous if entity.kind == "drug"
+    ]
+    return {
+        "query": {
+            "proteins": [
+                {"name": p.name, "identifier": p.identifier, "source": _source(p.source)}
+                for p in result.proteins
+            ],
+            "drugs": [
+                {"name": d.name, "identifier": d.identifier, "source": _source(d.source)}
+                for d in result.drugs
+            ] + ambiguous_drugs,
+        },
+        "pending": pending,
+        "unresolved": [f"{u.name} ({u.kind}): {u.reason}" for u in result.unresolved],
+    }
+
+
+def _screensuite_recommendation(hits: List[Dict[str, Any]], screened: List[str]) -> str:
+    """Plain-language recommendation comparing all protein-drug docking results."""
+    if not hits:
+        return "Screening produced no ranked hits."
+    best = min(hits, key=lambda h: h.get("affinityKcalPerMol") or 0.0)
+    lines = [
+        f"Best combination: {best['compound']} docked against {best['protein']} "
+        f"with a binding affinity of {best['affinityKcalPerMol']} kcal/mol "
+        "(more negative = stronger binding)."
+    ]
+    if len(screened) > 1:
+        by_protein: Dict[str, List[float]] = {}
+        for h in hits:
+            protein = h.get("protein") or ""
+            aff = h.get("affinityKcalPerMol")
+            if protein and aff is not None:
+                by_protein.setdefault(protein, []).append(aff)
+        protein_bests = {p: min(affs) for p, affs in by_protein.items() if affs}
+        ranked = sorted(protein_bests.items(), key=lambda x: x[1])
+        comparison = "; ".join(f"{p} {aff} kcal/mol" for p, aff in ranked)
+        lines.append(f"Protein comparison (best affinity per target): {comparison}.")
+    top = hits[:3]
+    if len(top) > 1:
+        top_str = "; ".join(
+            f"{h['compound']}/{h['protein']} {h['affinityKcalPerMol']} kcal/mol"
+            for h in top
+        )
+        lines.append(f"Top hits: {top_str}.")
+    lines.append(
+        "Check the Interactions panel for H-bond and residue contact details. "
+        "Proceed to NovSearch to assess patent novelty for the leading combination."
+    )
+    return " ".join(lines)
 
 
 async def _run_screensuite_on_databricks(params: Dict[str, Any], ctx: JobContext) -> Dict[str, Any]:
@@ -1613,19 +2023,64 @@ async def _run_screensuite_on_databricks(params: Dict[str, Any], ctx: JobContext
             '[{"drug_name": "ruxolitinib"}]. A PubChem CID can be passed as '
             '"identifier" to skip the name lookup.'
         )
+    if not query["proteins"]:
+        raise RunnerError(
+            "ScreenSuite docks compounds against a protein structure, and no "
+            "protein was selected. Pick one or more targets from the TxKG "
+            'results, or name them — for example "dock JAK2 and STAT3 with '
+            'ruxolitinib".'
+        )
 
+    # What a resumed run carries forward — built from the request as asked, so a
+    # later answer to the structure question keeps every protein and compound.
+    resume = {
+        "targets": [p["name"] for p in query["proteins"]],
+        "compounds": [{"drug_name": d["name"], **({"identifier": d["identifier"]} if d.get("identifier") else {})}
+                      for d in query["drugs"]],
+        "structures": {
+            p["name"].upper(): p["identifier"]
+            for p in query["proteins"] if p.get("source") == "pdb" and p.get("identifier")
+        },
+    }
+
+    ctx.progress("Resolving proteins and compounds to structures...")
+    pre = await asyncio.to_thread(_pre_resolve, query)
+    if pre is not None:
+        if pre["pending"]:
+            # Ask before any compute is spent: one docking run after the choice
+            # covers every protein, instead of docking some now and the rest later.
+            return _awaiting_structures(target, resume, pre["pending"])
+        if not pre["query"]["proteins"] or not pre["query"]["drugs"]:
+            raise RunnerError(
+                "Nothing to dock — "
+                + ("; ".join(pre["unresolved"]) or "no protein or compound could be resolved")
+                + ". Check the names, or give a PDB id for the protein (e.g. 6VGL for JAK2)."
+            )
+        query = pre["query"]
+
+    names = ", ".join(p["name"] for p in query["proteins"])
     ctx.progress(
-        f"Docking {len(query['drugs'])} compound(s) against {target} on Databricks..."
+        f"Docking {len(query['drugs'])} compound(s) against "
+        f"{len(query['proteins'])} protein(s) ({names}) on Databricks..."
     )
     # Only `query` is sent: run_now rejects any parameter the job does not
     # declare, and the notebook reads its input from `query`.
-    await execution.run_module("ScreenSuite", {"query": json.dumps(query)}, ctx)
+    # Returns when the docking task is done; the job's Gold write carries on
+    # afterwards in its own task.
+    run_id = await execution.run_module(
+        "ScreenSuite", {"query": json.dumps(query)}, ctx, until_task="screensuite"
+    )
 
     ctx.progress("Reading docking results...")
-    try:
-        rows = await asyncio.to_thread(gold.read_job_rows, "docking_results", ctx.job_id)
-    except gold.GoldUnavailable as exc:
-        raise RunnerError(f"The ScreenSuite job finished but its results could not be read: {exc}")
+    payload = await asyncio.to_thread(_screensuite_task_payload, run_id) or {}
+    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else None
+    manifest_results = payload.get("results") or []
+    if rows is None:
+        # Too large to hand over, or an older notebook: the task wrote Gold itself.
+        try:
+            rows = await asyncio.to_thread(gold.read_job_rows, "docking_results", ctx.job_id)
+        except gold.GoldUnavailable as exc:
+            raise RunnerError(f"The ScreenSuite job finished but its results could not be read: {exc}")
 
     def _failed(row: Dict[str, Any]) -> bool:
         return (row.get("status") or "").startswith("Failed")
@@ -1633,35 +2088,16 @@ async def _run_screensuite_on_databricks(params: Dict[str, Any], ctx: JobContext
     ranked = [row for row in rows if not _failed(row)]
     failures = [row.get("status") for row in rows if _failed(row) and row.get("status")]
 
+    pending = _structure_choices_by_target(failures)
+
     if not ranked:
         reason = "; ".join(failures) or "the job wrote no results"
-        # An ambiguous structure is a question, not a failure. The resolution
-        # step deliberately stops before spending compute and hands back a
-        # shortlist — docking the wrong JAK2 domain is far more expensive than
-        # one round trip — but the runner was turning that into a failed job, so
-        # the researcher saw a red error instead of the choice they were being
-        # asked to make. Mirrors CurateX's `awaiting_target_confirmation`.
-        candidates = _structure_choices(failures)
-        if candidates:
-            return {
-                "stage": "awaiting_structure_confirmation",
-                "target": target,
-                "structureChoices": candidates,
-                # `hits: []` alongside a completed job read as "docking returned
-                # no hits", so the screen showed "Docking output is not
-                # available" underneath a question it was actually asking. The
-                # empty list stays — removing a key the UI already reads would
-                # break it — but these two say plainly that nothing was screened
-                # *yet*. Branch on `awaitingInput`, never on `hits.length`.
-                "awaitingInput": True,
-                "awaitingInputKind": "structure",
-                "hits": [],
-                "totalHits": 0,
-                "summary": (
-                    f"'{target}' matches {len(candidates)} structures. "
-                    "Choose one to screen against — nothing has been docked yet."
-                ),
-            }
+        # An ambiguous structure is a question, not a failure — see
+        # `_awaiting_structures`. Pre-resolution normally asks before the job
+        # starts; this covers a job that resolved on its own (pre-resolution
+        # unavailable).
+        if pending:
+            return _awaiting_structures(target, resume, pending)
         raise RunnerError(f"Screening produced no hits for '{target}'. {reason}")
 
     ranked.sort(key=lambda r: gold.as_float(r, "affinity_kcal_mol", 0.0) or 0.0)
@@ -1675,18 +2111,63 @@ async def _run_screensuite_on_databricks(params: Dict[str, Any], ctx: JobContext
         }
         for row in ranked
     ]
-    _persist_screensuite_hits(ctx, target, hits)
+    # Each hit names the persisted result it belongs to (best pose per protein ×
+    # drug), which is what the results / interactions / files endpoints key on.
+    by_pair = {
+        (str(r.get("protein") or "").upper(), str(r.get("drug") or "").upper()): r["resultId"]
+        for r in manifest_results if r.get("resultId")
+    }
+    for hit in hits:
+        hit["resultId"] = by_pair.get((hit["protein"].upper(), hit["compound"].upper()))
+    screening_id = payload.get("screeningId") or ctx.job_id
+    if manifest_results:
+        _record_screening_owner(ctx, screening_id)
+    # Record-keeping only (three UC upserts through the SQL warehouse, ~28 s):
+    # the researcher does not wait for it, so it runs after the result is back.
+    import threading
 
+    threading.Thread(
+        target=_persist_screensuite_hits, args=(ctx, target, hits), daemon=True
+    ).start()
+
+    screened = [p["name"] for p in query["proteins"]]
     return {
         "target": target,
+        # The full protein set this run covered. Each hit already names its own
+        # `protein`, so a multi-protein run is separable row by row; this is the
+        # header for it.
+        "targets": screened,
         "queued": False,
         "status": "partial" if failures else "success",
         "compoundLibrary": params.get("compoundLibrary"),
         "hits": hits,
         "failures": failures,
         "runId": ranked[0].get("run_id"),
-        "summary": f"{len(hits)} screening hit(s) for {target}"
-        + (f"; {len(failures)} failure(s)" if failures else ""),
+        # The persisted results (see app/drp/screensuite_results.py): one per
+        # protein × drug with per-stage status and volume-backed files. The run id
+        # is how the interaction stage's progress is followed after this returns.
+        "screeningId": screening_id,
+        "results": manifest_results,
+        "failureDetails": payload.get("failures") or [],
+        "databricksRunId": run_id,
+        **{k: v for k, v in resume.items() if k != "targets"},
+        # Proteins the job skipped because their name matched several structures.
+        # The rest docked; these still need a choice, so the screen shows the
+        # hits *and* the question rather than burying it in `failures`.
+        "pendingStructures": pending,
+        "awaitingInput": bool(pending),
+        "awaitingInputKind": "structure" if pending else None,
+        "summary": (
+            f"{len(hits)} screening hit(s) for "
+            + (", ".join(screened) if len(screened) > 1 else target)
+            + (
+                "; choose a structure for " + ", ".join(p["target"] for p in pending)
+                + " to screen it too"
+                if pending
+                else (f"; {len(failures)} failure(s)" if failures else "")
+            )
+        ),
+        "recommendation": _screensuite_recommendation(hits, screened),
     }
 
 
@@ -1708,13 +2189,21 @@ async def run_screensuite_screen(params: Dict[str, Any], ctx: JobContext) -> Dic
 
     target = (params.get("target") or "").strip()
     if not target:
+        # `targets` alone is a valid request — an API caller may send the list
+        # without repeating its head — so fall back to it before refusing.
+        for name in params.get("targets") or []:
+            if str(name or "").strip():
+                target = str(name).strip()
+                break
+    if not target:
         # Reached when a hand-off carries no selected protein. The disease used
         # to stand in here, so compounds were screened against "thrombocytosis"
         # and failed later, and less legibly, inside structure resolution.
         raise RunnerError(
             "ScreenSuite docks compounds against a protein structure, and no "
-            "protein was selected. Pick a target from the TxKG results, or name "
-            'one in your request — for example "dock JAK2 with imatinib".'
+            "protein was selected. Pick one or more targets from the TxKG "
+            'results, or name them in your request — for example "dock JAK2 '
+            'and STAT3 with imatinib".'
         )
 
     if execution.should_delegate("ScreenSuite"):
@@ -1883,10 +2372,15 @@ def _patent_rows(
     The original snake_case keys are kept alongside the camelCase ones: anything
     already reading them keeps working, and nothing has to change at once.
     """
+    from DRP_Main.app.modules.novelty.google_patents_service import canonical_url_id
+
     indexed = {str(p) for p in (used or [])}
     rows: List[Dict[str, Any]] = []
     for row in table or []:
         pid = str(row.get("patent_id") or "").strip()
+        # canonical_url_id zero-pads US pre-grant serial numbers (6 → 7 digits)
+        # so the link resolves on Google Patents — e.g. US2011059488 → US20110059488.
+        url_pid = canonical_url_id(pid) if pid else ""
         out = dict(row)
         out.update(
             {
@@ -1898,7 +2392,7 @@ def _patent_rows(
                 "publicationDate": row.get("publication_date"),
                 "relevanceScore": row.get("relevance_score"),
                 "rank": row.get("rank"),
-                "url": f"https://patents.google.com/patent/{pid}" if pid else "",
+                "url": f"https://patents.google.com/patent/{url_pid}" if url_pid else "",
                 "indexed": pid in indexed,
             }
         )
@@ -1944,6 +2438,7 @@ async def run_novsearch_assess(params: Dict[str, Any], ctx: JobContext) -> Dict[
     if isinstance(recommendations, str):
         recommendations = [r.strip("-• ") for r in recommendations.splitlines() if r.strip()]
 
+    patents = _patent_rows(result.get("patents_table", []), report.get("patents_used", []))
     out: Dict[str, Any] = {
         "query": result.get("query", ""),
         "inputSource": result.get("input_source", "user_direct"),
@@ -1951,11 +2446,13 @@ async def run_novsearch_assess(params: Dict[str, Any], ctx: JobContext) -> Dict[
         "disease": (params.get("disease") or "").strip(),
         "assessment": report.get("agent_answer", ""),
         "recommendations": list(recommendations or []),
-        "patents": _patent_rows(
-            result.get("patents_table", []), report.get("patents_used", [])
-        ),
+        "patents": patents,
         "patentsUsed": report.get("patents_used", []),
-        "totalPatents": report.get("total_patents", 0),
+        # The rows returned. This was the synthesis step's own count — only the
+        # patents it could read — so "Analysed 1 patent" sat above a 2-row table.
+        "totalPatents": len(patents),
+        # That synthesis count, under its own name.
+        "totalPatentsSynthesised": report.get("total_patents", 0),
         "totalChunks": report.get("total_chunks", 0),
         "modelUsed": report.get("model_used"),
         "sessionStateUpdate": result.get("session_state_update", {}),

@@ -106,6 +106,9 @@ async def _invoke(endpoint: str, payload: Dict[str, Any]) -> Any:
 #  §4 step 4 — BGE-large embeddings
 # ══════════════════════════════════════════════════════════════════════════════
 
+_EMBED_QUERY_CACHE_MAX = 512
+
+
 class EmbeddingClient:
     """
     BGE-large-en-v1.5 on Databricks Model Serving.
@@ -113,11 +116,16 @@ class EmbeddingClient:
     1024-dimensional, L2-normalised, and prefixed per BGE's retrieval convention:
     `"query: "` for search queries, `"passage: "` for stored chunks. The store is
     cosine, so normalising here makes cosine equivalent to a dot product.
+
+    `embed_query` results are cached in-process: the same synthesis question or QA
+    question frequently repeats across multiple patents in one session, and the
+    embedding is deterministic, so re-embedding is pure waste.
     """
 
     def __init__(self, endpoint: Optional[str] = None) -> None:
         self.endpoint = endpoint or settings.NOVSEARCH_EMBEDDING_ENDPOINT
         self.dim = settings.NOVSEARCH_EMBEDDING_DIM
+        self._query_cache: Dict[str, List[float]] = {}
 
     async def _embed(self, texts: List[str]) -> np.ndarray:
         if not texts:
@@ -134,14 +142,27 @@ class EmbeddingClient:
         return arr / np.where(norms == 0, 1.0, norms)
 
     async def embed_query(self, query: str) -> List[float]:
+        if query in self._query_cache:
+            return self._query_cache[query]
         vectors = await self._embed([f"query: {query}"])
-        return vectors[0].tolist()
+        result = vectors[0].tolist()
+        if len(self._query_cache) >= _EMBED_QUERY_CACHE_MAX:
+            self._query_cache.pop(next(iter(self._query_cache)))
+        self._query_cache[query] = result
+        return result
 
     async def embed_passages(self, texts: List[str]) -> List[List[float]]:
         batch = max(1, settings.NOVSEARCH_EMBED_BATCH)
         out: List[List[float]] = []
         for i in range(0, len(texts), batch):
-            chunk = [f"passage: {t}" for t in texts[i : i + batch]]
+            # Truncate each passage to 300 words before prefixing so the whole
+            # batch stays well under the endpoint's 32 768-token limit.
+            # 300 words × ~1.5 tokens/word × 32 texts ≈ 14 400 tokens — safe
+            # even when chunk_size is the default 500 words.
+            chunk = [
+                f"passage: {' '.join(t.split()[:300])}"
+                for t in texts[i : i + batch]
+            ]
             out.extend(v.tolist() for v in await self._embed(chunk))
         return out
 
